@@ -11,6 +11,9 @@
             ],
             "yargonaut": [
                 "src/types/yargonaut"
+            ],
+            "why-is-node-running": [
+                "src/types/why-is-node-running"
             ]
         }
     },

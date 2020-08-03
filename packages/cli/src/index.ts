@@ -13,8 +13,10 @@
 * See the License for the specific language governing permissions and
 * limitations under the License.
 */
+import printProcessStatus from 'why-is-node-running'
 import sourceMapSupport from 'source-map-support'
 import { configFromDisk, telemetrySender } from '@salto-io/core'
+import { logger } from '@salto-io/logging'
 import { versionString, versionDetails } from './version'
 import cli from './cli'
 import { CliExitCode } from './types'
@@ -22,6 +24,11 @@ import commandBuilders from './commands'
 import oraSpinner from './ora_spinner'
 
 sourceMapSupport.install()
+
+const log = logger(module)
+
+process.on('SIGBREAK', () => printProcessStatus(log))
+process.on('SIGUSR2', () => printProcessStatus(log))
 
 const {
   stdin, stdout, stderr, argv,

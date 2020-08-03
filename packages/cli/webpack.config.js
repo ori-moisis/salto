@@ -45,6 +45,7 @@ module.exports = {
       }
     ],
   },
+  devtool: 'nosources-source-map',
   node: {
     __dirname: true,
     __filename: true,
