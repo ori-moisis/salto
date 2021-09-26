@@ -13,6 +13,8 @@
 * See the License for the specific language governing permissions and
 * limitations under the License.
 */
+import readline from 'readline'
+import { createWriteStream, createReadStream } from 'fs'
 import wu from 'wu'
 import _ from 'lodash'
 import { EventEmitter } from 'pietile-eventemitter'
@@ -22,11 +24,11 @@ import {
   FIELD_NAME, INSTANCE_NAME, OBJECT_NAME, ElemIdGetter, DetailedChange, SaltoError,
   isSaltoElementError, ProgressReporter, ReadOnlyElementsSource, TypeMap, isServiceId,
   CORE_ANNOTATIONS, AdapterOperationsContext, FetchResult, isAdditionChange, isStaticFile,
-  isAdditionOrModificationChange, Value, StaticFile, isElement,
+  isAdditionOrModificationChange, Value, StaticFile, isElement, isReferenceExpression,
 } from '@salto-io/adapter-api'
-import { applyInstancesDefaults, resolvePath, flattenElementStr, buildElementsSourceFromElements, safeJsonStringify, walkOnElement, WalkOnFunc, WALK_NEXT_STEP, setPath, walkOnValue } from '@salto-io/adapter-utils'
+import { applyInstancesDefaults, resolvePath, flattenElementStr, buildElementsSourceFromElements, safeJsonStringify, walkOnElement, WalkOnFunc, WALK_NEXT_STEP, setPath, walkOnValue, transformElement } from '@salto-io/adapter-utils'
 import { logger } from '@salto-io/logging'
-import { merger, elementSource, expressions, Workspace, pathIndex, updateElementsWithAlternativeAccount, createAdapterReplacedID, remoteMap } from '@salto-io/workspace'
+import { merger, elementSource, expressions, Workspace, pathIndex, updateElementsWithAlternativeAccount, createAdapterReplacedID, remoteMap, serialization } from '@salto-io/workspace'
 import { collections, promises, types, values } from '@salto-io/lowerdash'
 import { StepEvents } from './deploy'
 import { getPlan, Plan } from './plan'
@@ -442,12 +444,77 @@ const fetchAndProcessMergeErrors = async (
     const fetchResults = await Promise.all(
       Object.entries(accountsToAdapters)
         .map(async ([accountName, adapter]) => {
-          const fetchResult = await adapter.fetch({
-            progressReporter: progressReporters[accountName],
-          })
-          const { updatedConfig, errors } = fetchResult
+          const skipFetch = process.env.SALTO_SKIP_FETCH === '1'
+
+          const loadFetchElements = async (): Promise<Element[]> => {
+            const stream = createReadStream('fetch.json')
+            const lineReader = readline.createInterface({ input: stream, crlfDelay: Infinity })
+            const elements = await awu(lineReader)
+              .map(async line => (await serialization.deserialize(`[${line}]`))[0])
+              .toArray()
+
+            const mergedElements = await awu(
+              (await mergeElements(awu(elements))).merged.values()
+            ).toArray()
+
+            // Revive references
+            const resolvedMergedElements = await expressions.resolve(
+              mergedElements,
+              elementSource.createInMemoryElementSource(mergedElements)
+            )
+            const mergedElemSrc = elementSource.createInMemoryElementSource(resolvedMergedElements)
+
+            // Workaround for split types / instances. in a real fetch answer the top level
+            // types are split, but the `.type` member in instances / fields points to the
+            // original type before it was split
+            const resolveTypeRefs = async (elem: Element): Promise<void> => {
+              if (isObjectType(elem)) {
+                await awu(Object.values(elem.fields)).forEach(async field => {
+                  field.refType.type = await field.refType.getResolvedValue(mergedElemSrc)
+                })
+              }
+              if (isInstanceElement(elem)) {
+                elem.refType.type = await elem.refType.getResolvedValue(mergedElemSrc)
+              }
+              await awu(Object.values(elem.annotationRefTypes)).forEach(async ref => {
+                ref.type = await ref.getResolvedValue(mergedElemSrc)
+              })
+            }
+
+            // Resolve type refs in merged and in resolved because resolved can point to merged
+            await awu(mergedElements.values()).forEach(resolveTypeRefs)
+            await awu(elements).forEach(resolveTypeRefs)
+
+            // Resolve references using `transformElement` to force the resolution to happen with
+            // the merged element source and not with the elements
+            await awu(elements).forEach(element => (
+              transformElement({
+                element,
+                transformFunc: ({ value }) => {
+                  if (isReferenceExpression(value)) {
+                    value.value = value.getResolvedValue(mergedElemSrc)
+                  }
+                  return value
+                },
+                strict: false,
+              })
+            ))
+
+            return elements
+          }
+
+          const fetchResult = skipFetch
+            ? {
+              updatedConfig: undefined,
+              elements: await loadFetchElements(),
+            }
+            : await adapter.fetch(
+              { progressReporter: createAdapterProgressReporter(accountName, 'fetch', progressEmitter) }
+            )
+
           if (
-            fetchResult.elements.length > 0 && accountName !== accountToServiceNameMap[accountName]
+            fetchResult.elements.length > 0
+            && accountName !== accountToServiceNameMap[accountName]
           ) {
             await handleAccountNameUpdate(
               fetchResult, accountName, accountToServiceNameMap[accountName],
@@ -455,6 +522,24 @@ const fetchAndProcessMergeErrors = async (
           }
           // We need to flatten the elements string to avoid a memory leak. See docs
           // of the flattenElementStr method for more details.
+          const { updatedConfig, errors } = fetchResult
+
+          log.info('finished fetching from adapter')
+          if (!skipFetch) {
+            const stream = createWriteStream('fetch.json', { emitClose: true })
+            const closeP = new Promise(resolve => stream.on('close', resolve))
+            fetchResult.elements.forEach(e => {
+              const serializedElement = serialization.serialize(
+                [e], 'keepRef', { staticFileContent: true },
+              ).slice(1, -1) // Slice to remove the [] around the element
+              stream.write(`${serializedElement}\n`)
+            })
+            stream.close()
+            log.info('called close on file')
+            await closeP
+            log.info('finished closing file')
+          }
+
           return {
             elements: fetchResult.elements.map(flattenElementStr),
             errors: errors ?? [],

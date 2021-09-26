@@ -32,12 +32,12 @@ export const cleanAction: WorkspaceCommandAction<CleanArgs> = async ({
   output,
   workspace,
 }): Promise<CliExitCode> => {
-  const shouldCleanAnything = Object.values(cleanArgs).some(shouldClean => shouldClean)
-  if (!shouldCleanAnything) {
-    outputLine(header(Prompts.EMPTY_PLAN), output)
-    outputLine(EOL, output)
-    return CliExitCode.UserInputError
-  }
+  // const shouldCleanAnything = Object.values(cleanArgs).some(shouldClean => shouldClean)
+  // if (!shouldCleanAnything) {
+  //   outputLine(header(Prompts.EMPTY_PLAN), output)
+  //   outputLine(EOL, output)
+  //   return CliExitCode.UserInputError
+  // }
   if (cleanArgs.staticResources && !(cleanArgs.state && cleanArgs.cache && cleanArgs.nacl)) {
     errorOutputLine('Cannot clear static resources without clearing the state, cache and nacls', output)
     outputLine(EOL, output)

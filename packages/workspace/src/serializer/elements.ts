@@ -137,14 +137,23 @@ function isSerializedClass(value: any): value is SerializedClass {
     && value[SALTO_CLASS_FIELD] in NameToType
 }
 
+type SerializeOptions = Partial<{
+  staticFileContent: boolean
+}>
+
+const DEFAULT_SERIALIZE_OPTS: Required<SerializeOptions> = {
+  staticFileContent: false,
+}
+
 export const serialize = <T = Element>(
   elements: T[],
-  referenceSerializerMode: 'replaceRefWithValue' | 'keepRef' = 'replaceRefWithValue'
+  referenceSerializerMode: 'replaceRefWithValue' | 'keepRef' = 'replaceRefWithValue',
+  options?: SerializeOptions,
 ): string => {
-  // eslint-disable-next-line @typescript-eslint/no-shadow
-  const saltoClassReplacer = <T extends Serializable>(e: T): T & SerializedClass => {
+  const opts = _.merge({}, DEFAULT_SERIALIZE_OPTS, options)
+  const saltoClassReplacer = <U extends Serializable>(e: U): U & SerializedClass => {
     // Add property SALTO_CLASS_FIELD
-    const o = _.clone(e as T & SerializedClass)
+    const o = _.clone(e as U & SerializedClass)
     o[SALTO_CLASS_FIELD] = ctorNameToSerializedName[e.constructor.name]
       || nameToTypeEntries.find(([_name, type]) => e instanceof type)?.[0]
     return o
@@ -194,7 +203,11 @@ export const serialize = <T = Element>(
         return referenceTypeReplacer(v)
       }
       if (isStaticFile(v)) {
-        return staticFileReplacer(v)
+        const withoutData = staticFileReplacer(v)
+        return opts.staticFileContent
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          ? { ...withoutData, content: (v as any).content?.toString(v.encoding) }
+          : withoutData
       }
       if (isSaltoSerializable(v)) {
         return saltoClassReplacer(_.cloneDeepWith(v, replacer))
@@ -300,11 +313,16 @@ const generalDeserialize = async <T>(
       VariableExpression: v => (
         new VariableExpression(reviveElemID(v.elemID ?? v.elemId))
       ),
-      StaticFile: v => (
-        new StaticFile(
-          { filepath: v.filepath, hash: v.hash, encoding: v.encoding }
-        )
-      ),
+      StaticFile: v => {
+        const staticFile = v.content !== undefined
+          ? new StaticFile({
+            filepath: v.filepath,
+            encoding: v.encoding,
+            content: Buffer.from(v.content, v.encoding),
+          })
+          : new StaticFile({ filepath: v.filepath, encoding: v.encoding, hash: v.hash })
+        return staticFile
+      },
       MissingStaticFile: v => new MissingStaticFile(v.filepath),
       AccessDeniedStaticFile: v => new AccessDeniedStaticFile(v.filepath),
       DuplicateAnnotationError: v => (
