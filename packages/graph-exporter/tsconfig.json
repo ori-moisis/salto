@@ -1,0 +1,34 @@
+{
+    "extends": "../../tsconfig.base.json",
+    "compilerOptions": {
+        "outDir": "dist",
+        "baseUrl": ".",
+        "declaration": true,
+        "resolveJsonModule": true,
+        "noUnusedLocals": false,
+        "paths": {
+            "jsforce": [
+                "../../node_modules/jsforce-types"
+            ],
+            "yargonaut": [
+                "src/types/yargonaut"
+            ],
+            "neo4j-driver": [
+                "../../node_modules/neo4j-driver/types"
+            ]
+        }
+    },
+    "include": [
+        "src/**/*",
+        "src/**/*.json",
+        "test/**/*",
+        "e2e_test/**/*",
+        "index.ts"
+    ],
+    "references": [
+      { "path": "../adapter-api" },
+      { "path": "../adapter-utils" },
+      { "path": "../core" },
+      { "path": "../lowerdash" }
+    ]
+}
