@@ -22,7 +22,9 @@ import { loadLocalWorkspace } from '@salto-io/core'
 import neo4j, { QueryResult } from 'neo4j-driver'
 import yargs from 'yargs'
 import { isObjectType, Element, isType, InstanceElement, isInstanceElement, Field, isField, INSTANCE_ANNOTATIONS, ReferenceExpression, isReferenceExpression, isListType, ElemID, isPrimitiveValue, isPrimitiveType, BuiltinTypes } from '@salto-io/adapter-api'
-import { transformElement, TransformFunc } from '@salto-io/adapter-utils'
+import { transformElement, TransformFunc, walkOnElement, WalkOnFunc } from '@salto-io/adapter-utils'
+
+const { awu } = collections.asynciterable
 
 sourceMapSupport.install()
 
@@ -59,7 +61,7 @@ type VertexDef = {
 
 const vertexType = (elem: Element): string => {
   if (isType(elem)) return 'type'
-  if (isInstanceElement(elem)) return `instance:${elem.type.elemID.name}`
+  if (isInstanceElement(elem)) return `instance:${elem.refType.elemID.name}`
   return 'field'
 }
 
@@ -103,7 +105,7 @@ const typeEdges: EdgeProvider = elem => (
     ? [{
       type: 'hasType',
       from: elem.elemID.getFullName(),
-      to: elem.type.elemID.getFullName(),
+      to: elem.refType.elemID.getFullName(),
       props: {},
     }]
     : []
@@ -114,7 +116,7 @@ const parentEdges: EdgeProvider = elem => (
     .map((parent: ReferenceExpression) => ({
       type: 'childOf',
       from: elem.elemID.getFullName(),
-      to: parent.elemId.getFullName(),
+      to: parent.elemID.getFullName(),
       props: {},
     }))
 )
@@ -124,7 +126,7 @@ const dependsOnEdges: EdgeProvider = elem => (
     .map((parent: ReferenceExpression) => ({
       type: 'dependsOn',
       from: elem.elemID.getFullName(),
-      to: parent.elemId.getFullName(),
+      to: parent.elemID.getFullName(),
       props: {},
     }))
 )
@@ -132,22 +134,21 @@ const dependsOnEdges: EdgeProvider = elem => (
 const referenceEdges: (fromParent: boolean) => EdgeProvider = fromParent => elem => {
   if (isListType(elem)) return []
   const edges: EdgeDef[] = []
-  const getAllRefs: TransformFunc = ({ value, path }) => {
+  const getAllRefs: WalkOnFunc = ({ value, path }) => {
     if (isReferenceExpression(value)) {
       edges.push({
         from: fromParent ? elem.elemID.getFullName() : path?.getFullName() as string,
         // TODO: there is a bug here in orientDB if only top level elements are in the graph
-        to: value.elemId.getFullName(),
+        to: value.elemID.getFullName(),
         type: 'reference',
         props: path === undefined ? {} : { src: path.getFullName() },
       })
     }
     return value
   }
-  transformElement({
+  walkOnElement({
     element: elem,
-    transformFunc: getAllRefs,
-    strict: false,
+    func: getAllRefs,
   })
   return edges
 }
@@ -155,7 +156,7 @@ const referenceEdges: (fromParent: boolean) => EdgeProvider = fromParent => elem
 const valueEdges: EdgeProvider = elem => {
   if (isType(elem)) return []
   const edges: EdgeDef[] = []
-  const getValueEdges: TransformFunc = ({ value, path }) => {
+  const getValueEdges: WalkOnFunc = ({ value, path }) => {
     if (path !== undefined && path !== elem.elemID) {
       edges.push({
         from: path.createParentID().getFullName(),
@@ -166,17 +167,16 @@ const valueEdges: EdgeProvider = elem => {
     }
     return value
   }
-  transformElement({
+  walkOnElement({
     element: elem,
-    transformFunc: getValueEdges,
-    strict: false,
+    func: getValueEdges,
   })
   return edges
 }
 
 const listTypeEdges: EdgeProvider = elem => (
   isListType(elem)
-    ? [{ from: elem.elemID.getFullName(), to: elem.innerType.elemID.getFullName(), type: 'hasType', props: {} }]
+    ? [{ from: elem.elemID.getFullName(), to: elem.refInnerType.elemID.getFullName(), type: 'hasType', props: {} }]
     : []
 )
 
@@ -234,7 +234,7 @@ const neoDbClient = (url: string): DBClient => {
         const mainVertex = elemToVertex(elem, false)
         if (isType(elem)) return [mainVertex]
         const valueVertices: VertexDef[] = []
-        const createValueNodes: TransformFunc = ({ value, path }) => {
+        const createValueNodes: WalkOnFunc = ({ value, path }) => {
           if (path !== undefined) {
             valueVertices.push({
               type: 'value',
@@ -249,10 +249,9 @@ const neoDbClient = (url: string): DBClient => {
           }
           return value
         }
-        transformElement({
+        walkOnElement({
           element: elem,
-          transformFunc: createValueNodes,
-          strict: false,
+          func: createValueNodes,
         })
         return [mainVertex, ...valueVertices]
       }
@@ -384,11 +383,11 @@ const main = async (): Promise<number> => {
 
   console.log('Loading workspace...')
   const ws = await loadLocalWorkspace(args.workspace as string)
-  const elements = await ws.elements()
+  const elements = await awu(await (await ws.elements()).getAll()).toArray()
   await ws.flush()
 
   try {
-    const client = await neoDbClient(`bolt://${args.db}`)
+    const client = neoDbClient(`bolt://${args.db}`)
     const allTypes = [...elements, ...Object.values(BuiltinTypes)]
     console.log('clearing DB')
     await client.clear()
@@ -404,4 +403,5 @@ const main = async (): Promise<number> => {
   return 0
 }
 
+// eslint-disable-next-line @typescript-eslint/no-floating-promises
 main().then(exitCode => process.exit(exitCode))
