@@ -1,6 +1,6 @@
 {
   "name": "@salto-io/graph-exporter",
-  "version": "0.3.4",
+  "version": "0.3.5",
   "license": "Apache-2.0",
   "description": "export salto element graph to graph db",
   "repository": {
@@ -32,10 +32,10 @@
     "package": "node ./package_native.js"
   },
   "dependencies": {
-    "@salto-io/adapter-api": "0.3.4",
-    "@salto-io/adapter-utils": "0.3.4",
-    "@salto-io/core": "0.3.4",
-    "@salto-io/lowerdash": "0.3.4",
+    "@salto-io/adapter-api": "0.3.5",
+    "@salto-io/adapter-utils": "0.3.5",
+    "@salto-io/core": "0.3.5",
+    "@salto-io/lowerdash": "0.3.5",
     "chalk": "^2.4.2",
     "figlet": "^1.2.4",
     "glob": "^7.1.6",

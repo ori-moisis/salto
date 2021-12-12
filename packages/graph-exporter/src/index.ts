@@ -69,7 +69,7 @@ const elemToVertex = (elem: Element, withValues = true): VertexDef => ({
   type: vertexType(elem),
   props: {
     id: elem.elemID.getFullName(),
-    name: elem.elemID.getFullNameParts().pop(),
+    name: isField(elem) ? `${elem.elemID.typeName}.${elem.elemID.name}` : elem.elemID.getFullNameParts().pop(),
     adapter: elem.elemID.adapter,
     ...withValues ? elem.annotations : {},
     ...withValues && isInstanceElement(elem) ? elem.value : {},
@@ -249,10 +249,10 @@ const neoDbClient = (url: string): DBClient => {
           }
           return value
         }
-        walkOnElement({
-          element: elem,
-          func: createValueNodes,
-        })
+        // walkOnElement({
+        //   element: elem,
+        //   func: createValueNodes,
+        // })
         return [mainVertex, ...valueVertices]
       }
       const allElements = _.flatten(
@@ -334,7 +334,7 @@ const neoDbClient = (url: string): DBClient => {
       )
       const edgeProvider = elemToEdges([
         fieldEdges, typeEdges, parentEdges, dependsOnEdges, // referenceEdges(true),
-        referenceEdges(false), valueEdges, listTypeEdges,
+        referenceEdges(true), valueEdges, listTypeEdges,
       ])
 
       const allEdges = _(allElements)
