@@ -24,6 +24,7 @@ import { CUSTOM_METADATA_SUFFIX, FORMULA, SALESFORCE } from '../constants'
 import { FormulaIdentifierInfo, IdentifierType, parseFormulaIdentifier } from './formula_utils/parse'
 import { buildElementsSourceForFetch, extractFlatCustomObjectFields } from './utils'
 
+// should not use this type of import, if formulon is missing type definitions, add them
 /* eslint-disable-next-line @typescript-eslint/no-var-requires */
 const formulon = require('formulon')
 
@@ -76,14 +77,14 @@ const referencesFromIdentifiers = async (typeInfos: FormulaIdentifierInfo[]): Pr
 
 const addDependenciesAnnotation = async (field: Field, allElements: ReadOnlyElementsSource): Promise<void> => {
   const isValidReference = async (elemId: ElemID): Promise<boolean> => {
-    if (elemId.idType === 'type' || elemId.idType === 'instance') {
-      return await allElements.get(elemId) !== undefined
+    if (elemId.idType === 'field') {
+      // In the previous code there was an assumption that any id which is not `type` or `instance` is a field
+      // but that is not true, it is not safe to make that assumption
+      const typeElement = await allElements.get(elemId.createTopLevelParentID().parent)
+      return (typeElement !== undefined) && (typeElement.fields[elemId.name] !== undefined)
     }
 
-    // field
-    const typeElemId = new ElemID(elemId.adapter, elemId.typeName)
-    const typeElement = await allElements.get(typeElemId)
-    return (typeElement !== undefined) && (typeElement.fields[elemId.name] !== undefined)
+    return allElements.has(elemId)
   }
 
   const logInvalidReferences = (
@@ -92,6 +93,9 @@ const addDependenciesAnnotation = async (field: Field, allElements: ReadOnlyElem
     identifiersInfo: FormulaIdentifierInfo[][]
   ): void => {
     if (invalidReferences.length > 0) {
+      // error level log means something is going to fail, we encountered a scenario that we cannot handle
+      // in this case, we can and do handle this scenario
+      // this should not be more than a "warn" (same for all other error logs here)
       log.error('When parsing the formula %o in field %o, one or more of the identifiers %o was parsed to an invalid reference: ',
         formula,
         field.elemID.getFullName(),
@@ -108,9 +112,13 @@ const addDependenciesAnnotation = async (field: Field, allElements: ReadOnlyElem
     return
   }
 
+  // log per field in SF is a crazy amount of logs
+  // this should at most be a trace log, but probably not needed at all
+  // also, logs should use %s, not string template literals
   log.debug(`Extracting formula refs from ${field.elemID.getFullName()}`)
 
   try {
+    // similar - this will create a crazy amount of logs
     const formulaIdentifiers: string[] = log.time(
       () => (extract(formula)),
       `Parse formula '${formula.slice(0, 15)}'`
@@ -118,6 +126,10 @@ const addDependenciesAnnotation = async (field: Field, allElements: ReadOnlyElem
 
     const identifiersInfo = await log.time(
       () => Promise.all(
+        // Using the typename here is not technically correct, we should be using the salesforce name
+        // this should work in a similar way to field_references, creating an index of elements by API name
+        // it may be possible to share some of the code?
+        // this will also make some of the code below redundant
         formulaIdentifiers.map(async identifier => parseFormulaIdentifier(identifier, field.parent.elemID.typeName))
       ),
       'Convert formula identifiers to references'
@@ -127,6 +139,8 @@ const addDependenciesAnnotation = async (field: Field, allElements: ReadOnlyElem
     // filtering.
     const references = (await referencesFromIdentifiers(identifiersInfo.flat()))
 
+    // this is essentially comparing identifiersInfo.length with identifiersInfo.flat().length, which will almost always
+    // be true (unless identifiersInfo.length is 0)
     if (references.length < identifiersInfo.length) {
       log.warn(`Some formula identifiers were not converted to references.
       Field: ${field.elemID.getFullName()}

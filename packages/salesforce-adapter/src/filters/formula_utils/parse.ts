@@ -69,6 +69,8 @@ export const parseObject = (object: string): FormulaIdentifierInfo => {
 
 export const parseCustomMetadata = (value: string): FormulaIdentifierInfo[] => {
   // 'value' looks like $CustomMetadata.Trigger_Context_Status__mdt.SRM_Metadata_c.Enable_After_Insert__c
+  // This makes a strong assumption on the number of "." in the value which is not validated anywhere
+  // so, for example, if there is less than 3 "."s, fieldName will be undefined and the code will crash on "parseField"
   const [, sobject, sobjInstance, fieldName] = parts(value)
 
   return [
@@ -152,11 +154,14 @@ const parseRelationship = (variableName: string, originalObject: string): Formul
       if (isStandardRelationship(fieldName)) {
         fieldName = transformToId(fieldName)
       } else {
+        // Why can we assume that? doesn't seem like anything checks that this is the case
         // We assume the field ends with '_r'
         fieldName = fieldName.slice(0, -1).concat('c')
       }
     }
 
+    // This is unexpected, why do we have CPQ specific code here?
+    // How can CPQ do things that are not standard in salesforce?
     if (isCPQRelationship(fieldName)) {
       fieldName = mapCPQField(fieldName, originalObject)
     }
@@ -165,6 +170,8 @@ const parseRelationship = (variableName: string, originalObject: string): Formul
       fieldName = transformToUserField(fieldName)
     }
 
+    // I am completely lost trying to understand what this is trying to achieve
+    // any comment would help, I have to believe there is a simpler way to do whatever this is doing
     let updatedLastKnownParent = lastKnownParent
     if (isParentField(fieldName) && lastKnownParent === '') {
       updatedLastKnownParent = baseObject
