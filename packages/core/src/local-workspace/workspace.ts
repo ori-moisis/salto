@@ -16,7 +16,7 @@
 import _ from 'lodash'
 import path from 'path'
 import { v4 as uuidv4 } from 'uuid'
-import { DetailedChange, ObjectType } from '@salto-io/adapter-api'
+import { Change, DetailedChange, ObjectType } from '@salto-io/adapter-api'
 import { exists, isEmptyDir, rm } from '@salto-io/file'
 import { Workspace, loadWorkspace, EnvironmentsSources, initWorkspace, nacl, remoteMap,
   configSource as cs, staticFiles, dirStore, WorkspaceComponents, errors, elementSource,
@@ -251,6 +251,7 @@ type LoadLocalWorkspaceArgs = {
   persistent?: boolean
   stateStaticFilesSource?: staticFiles.StateStaticFilesSource
   credentialSource?: cs.ConfigSource
+  changesCallback?: (changes: Change[]) => void
 }
 
 const loadLocalWorkspaceImpl = async ({
@@ -259,6 +260,7 @@ const loadLocalWorkspaceImpl = async ({
   persistent = true,
   credentialSource,
   stateStaticFilesSource,
+  changesCallback,
 }: LoadLocalWorkspaceArgs): Promise<Workspace> => {
   const baseDir = await locateWorkspaceRoot(path.resolve(lookupDir))
   if (_.isUndefined(baseDir)) {
@@ -295,7 +297,9 @@ const loadLocalWorkspaceImpl = async ({
     elemSources,
     remoteMapCreator,
     false,
-    persistent
+    persistent,
+    'rebuild',
+    changesCallback,
   )
 
   return {

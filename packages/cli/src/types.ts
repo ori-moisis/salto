@@ -123,8 +123,6 @@ type GetOptionsDefaultType<T> = T extends string[] ? never : T
 
 type PossiblePositionalArgs<T> = types.KeysOfExtendingType<T, string | string[] | undefined>
 
-type ChoicesType<T> = T extends string ? string[] : never
-
 export type PositionalOption<T, Name = PossiblePositionalArgs<T>>
   = Name extends PossiblePositionalArgs<T> ? {
   name: Name & string
@@ -132,7 +130,7 @@ export type PositionalOption<T, Name = PossiblePositionalArgs<T>>
   description?: string
   type: Exclude<GetTypeEnumValue<T[Name]>, 'boolean'>
   default?: GetOptionsDefaultType<T[Name]> & (string | boolean)
-  choices?: ChoicesType<T[Name]>
+  choices?: Array<T[Name]>
 } : never
 
 export type KeyedOption<T, Name extends keyof T = keyof T> = Name extends keyof T ? {
@@ -142,5 +140,5 @@ export type KeyedOption<T, Name extends keyof T = keyof T> = Name extends keyof 
   alias?: string
   type: GetTypeEnumValue<T[Name]>
   default?: GetOptionsDefaultType<T[Name]> & (string | boolean)
-  choices?: ChoicesType<T[Name]>
+  choices?: Array<T[Name]>
 } : never

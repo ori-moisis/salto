@@ -22,6 +22,7 @@ import initDef from './init'
 import restoreDef from './restore'
 import elementGroupDef from './element'
 import workspaceGroupDef from './workspace'
+import { aiGroupDef } from './ai'
 
 // The order of the builders determines order of appearance in help text
 export default [
@@ -35,4 +36,5 @@ export default [
   restoreDef,
   elementGroupDef,
   workspaceGroupDef,
+  aiGroupDef,
 ]

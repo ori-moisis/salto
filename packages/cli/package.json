@@ -36,6 +36,7 @@
     "package": "node ./package_native.js"
   },
   "dependencies": {
+    "@dqbd/tiktoken": "^1.0.7",
     "@salto-io/adapter-api": "0.3.44",
     "@salto-io/adapter-utils": "0.3.44",
     "@salto-io/core": "0.3.44",
@@ -45,6 +46,7 @@
     "@salto-io/lowerdash": "0.3.44",
     "@salto-io/salesforce-adapter": "0.3.44",
     "@salto-io/workspace": "0.3.44",
+    "bottleneck": "^2.19.5",
     "chalk": "^2.4.2",
     "commander": "^10.0.0",
     "express": "^4.17.1",
@@ -54,10 +56,12 @@
     "lodash": "^4.17.21",
     "moment": "^2.24.0",
     "open": "^7.2.0",
+    "openai": "^3.2.1",
     "ora": "^4.0.3",
     "package": "^1.0.1",
     "pietile-eventemitter": "^1.0.0",
     "semver": "^7.3.2",
+    "simple-git": "^3.18.0",
     "source-map-support": "^0.5.13",
     "wu": "^2.1.0"
   },

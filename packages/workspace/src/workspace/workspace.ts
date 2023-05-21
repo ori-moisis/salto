@@ -330,7 +330,8 @@ export const loadWorkspace = async (
   remoteMapCreator: RemoteMapCreator,
   ignoreFileChanges = false,
   persistent = true,
-  mergedRecoveryMode: MergedRecoveryMode = 'rebuild'
+  mergedRecoveryMode: MergedRecoveryMode = 'rebuild',
+  changesCallback?: (changes: Change[]) => void,
 ): Promise<Workspace> => {
   const workspaceConfig = await config.getWorkspaceConfig()
   log.debug('Loading workspace with id: %s', workspaceConfig.uid)
@@ -720,11 +721,16 @@ export const loadWorkspace = async (
         changeResult.cacheValid,
       )
 
-      const changedElements = changes
-        .filter(isAdditionOrModificationChange)
-        .map(getChangeData)
-      const changeIDs = changes.map(getChangeData).map(elem => elem.elemID)
+      if (changesCallback !== undefined) {
+        changesCallback(changes)
+      }
+
       if (validate) {
+        const changedElements = changes
+          .filter(isAdditionOrModificationChange)
+          .map(getChangeData)
+        const changeIDs = changes.map(getChangeData).map(elem => elem.elemID)
+
         const {
           errors: validationErrors,
           validatedElementsIDs,

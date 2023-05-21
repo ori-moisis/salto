@@ -14,7 +14,7 @@
 * limitations under the License.
 */
 import _ from 'lodash'
-import { values } from '@salto-io/lowerdash'
+import { types, values } from '@salto-io/lowerdash'
 import { logger, compareLogLevels, LogLevel } from '@salto-io/logging'
 import { Workspace } from '@salto-io/workspace'
 import { loadLocalWorkspace, Tags } from '@salto-io/core'
@@ -118,8 +118,8 @@ const validateChoices = <T>(
     ...keyedOptions,
   ].filter(option => option.choices !== undefined)
   const choicesValidationErrors = optionsWithChoices.map(optionWithChoice => {
-    if (args[optionWithChoice.name] !== undefined
-      && !optionWithChoice.choices?.includes(String(args[optionWithChoice.name]))) {
+    const choice = args[optionWithChoice.name] as types.ValueOf<typeof optionWithChoice.choices>
+    if (choice !== undefined && !optionWithChoice.choices?.includes(choice)) {
       return `error: option ${optionWithChoice.name} must be one of - [${optionWithChoice.choices?.join(', ')}]\n`
     }
     return undefined
