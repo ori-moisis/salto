@@ -21,6 +21,7 @@ import { Change, ChangeDataType, DetailedChange, getChangeData, isAdditionChange
 import { logger } from '@salto-io/logging'
 import { values } from '@salto-io/lowerdash'
 import { parser, nacl, staticFiles } from '@salto-io/workspace'
+import { chunkBySoft } from './utils'
 
 const log = logger(module)
 
@@ -155,36 +156,6 @@ const getReadableModificationDescription = async (
   return `In ${changedElemName}:\n${dumpedImportant}${indent(dumpedChanges.filter(values.isDefined).join('\n'), 1)}`
 }
 
-const chunkBy = <T>(
-  data: ReadonlyArray<T>,
-  softLimit: number,
-  hardLimit: number,
-  lengthFunc: (item: T) => number,
-): Array<Array<T>> => {
-  const outputChunks = []
-  let currChunk: Array<T> = []
-  let currLen = 0
-  data.forEach(item => {
-    const itemLen = lengthFunc(item)
-    if ((currLen + itemLen) > hardLimit && currChunk.length > 0) {
-      outputChunks.push(currChunk)
-      currLen = 0
-      currChunk = []
-    }
-    currLen += itemLen
-    currChunk.push(item)
-    if (currLen > softLimit) {
-      outputChunks.push(currChunk)
-      currLen = 0
-      currChunk = []
-    }
-  })
-  if (currChunk.length > 0) {
-    outputChunks.push(currChunk)
-  }
-  return outputChunks
-}
-
 type FormatChangesOptions = {
   maxTokens?: number
   modelName?: TiktokenModel
@@ -224,16 +195,8 @@ export const formatChangesForPrompt = async (changes: Change[], opts?: FormatCha
     .concat(formattedModifications)
     .filter(values.isDefined)
 
-  // Try to distribute the tokens evenly among chunks, this prevents us from having a very small commit where the model
-  // will tend to provide smaller details which we don't really want when we merge all the descriptions together
-  const totalTokens = formattedChanges.reduce((sum, change) => sum + encodingLength(change), 0)
-  const numGroups = Math.ceil(totalTokens / params.maxTokens)
-  const softChunkSize = Math.ceil(totalTokens / numGroups)
-  log.info('total tokens %d, splitting to %d groups with soft limit of %d', totalTokens, numGroups, softChunkSize)
-
-  const changeChunks = chunkBy(
+  const changeChunks = chunkBySoft(
     formattedChanges,
-    softChunkSize,
     params.maxTokens,
     formattedChange => encodingLength(formattedChange),
   )

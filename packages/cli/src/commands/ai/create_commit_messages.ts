@@ -54,7 +54,9 @@ const createCommitMessagesAction: CommandDefAction<CreateCommitMessagesArgs> = a
     return CliExitCode.UserInputError
   }
 
+  const outputStepsFolder = `${outputMessagesFolder}/steps`
   ensureDirExists(outputMessagesFolder)
+  ensureDirExists(outputStepsFolder)
 
   const promptForCommit = getPrompt(defaultPromptForCommit, commitPromptFile)
   const promptForMerge = getPrompt(defaultPromptForMerge, mergePromptFile)
@@ -65,7 +67,7 @@ const createCommitMessagesAction: CommandDefAction<CreateCommitMessagesArgs> = a
       log.debug('Generating message for file %s', filename)
       return {
         filename,
-        message: await getCommitMessageForChanges({
+        ...await getCommitMessageForChanges({
           changes,
           promptForCommit,
           promptForMerge,
@@ -73,8 +75,11 @@ const createCommitMessagesAction: CommandDefAction<CreateCommitMessagesArgs> = a
         }),
       }
     })
-    .forEach(({ filename, message }) => {
+    .forEach(({ filename, message, steps }) => {
       fs.writeFileSync(`${outputMessagesFolder}/${filename}_commit_msg.txt`, message)
+      steps.forEach((step, idx) => {
+        fs.writeFileSync(`${outputStepsFolder}/${filename}_step_${idx}.txt`, step)
+      })
     })
   return CliExitCode.Success
 }

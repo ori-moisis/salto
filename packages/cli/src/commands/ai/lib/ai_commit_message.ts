@@ -16,16 +16,22 @@
 import { Configuration, OpenAIApi } from 'openai'
 import Bottleneck from 'bottleneck'
 import { inspect } from 'util'
-import { collections } from '@salto-io/lowerdash'
 import { logger } from '@salto-io/logging'
+// eslint-disable-next-line camelcase
+import { encoding_for_model, TiktokenModel } from '@dqbd/tiktoken'
+import { chunkBySoft } from './utils'
 
-const { awu } = collections.asynciterable
 const log = logger(module)
 
 // TODO: make this not global
 const configuration = new Configuration({ apiKey: process.env.OPENAI_API_KEY })
 const openai = new OpenAIApi(configuration)
 const clientQueue = new Bottleneck({ maxConcurrent: 2 })
+// TODO: fill this information and move it somewhere else
+const MODEL_TOKEN_LIMIT: Partial<Record<TiktokenModel, number>> = {
+  'gpt-3.5-turbo': 4000,
+}
+
 
 const MAX_ATTEMPTS = 3
 const INITIAL_DELAY_SECONDS = 2
@@ -67,16 +73,53 @@ type GetCommitMessageForChangesArgs = {
   promptForCommit: string
   promptForMerge: string
   maxTokens: number
+  modelName?: TiktokenModel
 }
-export const getCommitMessageForChanges = async (
-  { changes, promptForCommit, promptForMerge, maxTokens }: GetCommitMessageForChangesArgs
-): Promise<string> => {
-  const commitMessages = await awu(changes)
-    .map(chunk => generateCompletion(chunk, promptForCommit, maxTokens))
-    .toArray()
-  if (commitMessages.length === 1) {
-    return commitMessages[0]
+type GetCommitMessageForChangesResult = {
+  message: string
+  steps: string[]
+}
+
+const reduceSummary = async (
+  summaries: string[],
+  prompt: string,
+  summaryMaxTokens: number,
+  modelName: TiktokenModel
+): Promise<GetCommitMessageForChangesResult> => {
+  const encoding = encoding_for_model(modelName)
+  const encodingLength = (text: string): number => encoding.encode(text).length
+  const modelMaxTokens = MODEL_TOKEN_LIMIT[modelName] ?? 4000
+
+  const summaryChunks = chunkBySoft(summaries, modelMaxTokens - summaryMaxTokens, encodingLength)
+  log.debug('Reducing %d summaries down to %d', summaries.length, summaryChunks.length)
+  const results = await Promise.all(
+    summaryChunks.map(chunk => generateCompletion(chunk.join('\n\n'), prompt, summaryMaxTokens))
+  )
+  if (results.length === 1) {
+    return { message: results[0], steps: [] }
   }
 
-  return generateCompletion(commitMessages.join('\n\n'), promptForMerge, maxTokens)
+  const recurseResult = await reduceSummary(results, prompt, summaryMaxTokens, modelName)
+  return {
+    message: recurseResult.message,
+    steps: results.concat(recurseResult.steps),
+  }
+}
+
+export const getCommitMessageForChanges = async (
+  { changes, promptForCommit, promptForMerge, maxTokens, modelName = 'gpt-3.5-turbo' }: GetCommitMessageForChangesArgs
+): Promise<GetCommitMessageForChangesResult> => {
+  log.debug('Generating messages for %d change descriptions', changes.length)
+  const commitMessages = await Promise.all(
+    changes.map(chunk => generateCompletion(chunk, promptForCommit, maxTokens))
+  )
+  if (commitMessages.length === 1) {
+    return { message: commitMessages[0], steps: commitMessages }
+  }
+
+  const reduceRes = await reduceSummary(commitMessages, promptForMerge, maxTokens, modelName)
+  return {
+    message: reduceRes.message,
+    steps: commitMessages.concat(reduceRes.steps),
+  }
 }
