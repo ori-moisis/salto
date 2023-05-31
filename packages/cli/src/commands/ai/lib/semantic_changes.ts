@@ -24,7 +24,6 @@ import { resetBranchToCommit } from './git_operations'
 
 const { awu } = collections.asynciterable
 
-
 type GetSemanticChangesArgs = {
   git: SimpleGit
   repoFolder: string
@@ -34,13 +33,18 @@ type GetSemanticChangesArgs = {
 export const getSemanticChanges = async (
   { git, repoFolder, fromCommit, toCommit }: GetSemanticChangesArgs
 ): Promise<Change[]> => {
+  const relevantFiles = (await git.raw('diff', '--name-only', fromCommit, toCommit))
+    .split('\n')
+    .map(name => name.split('/').slice(2).join('/')) // Remove envs/<env name>/ from the path
+
+
   await git.checkout(fromCommit)
 
   // Checkout state file from the target commit already to avoid invalidating everything
   await git.raw('checkout', toCommit, '--', 'salto.config/states')
 
   // Update workspace cache to ensure we have a baseline
-  const wsBefore = await loadLocalWorkspace({ path: repoFolder })
+  const wsBefore = await loadLocalWorkspace({ path: repoFolder, changedFiles: relevantFiles })
   await wsBefore.flush()
   await closeAllRemoteMaps()
 
@@ -53,7 +57,7 @@ export const getSemanticChanges = async (
   const changesCallback = (reportedChanges: Change[]): void => {
     changes = reportedChanges
   }
-  const wsAfter = await loadLocalWorkspace({ path: repoFolder, changesCallback })
+  const wsAfter = await loadLocalWorkspace({ path: repoFolder, changesCallback, changedFiles: relevantFiles })
   await wsAfter.flush() // Must call flush to trigger the actual loading
   await closeAllRemoteMaps()
   return changes

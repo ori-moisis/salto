@@ -525,8 +525,10 @@ const buildMultiEnvSource = (
     )).every(e => e)
   )
 
-  const load = async ({ ignoreFileChanges = false }: SourceLoadParams): Promise<EnvsChanges> => {
-    const changes = await mapValuesAsync(sources, src => src.load({ ignoreFileChanges }))
+  const load = async (
+    { ignoreFileChanges = false, changedFiles }: SourceLoadParams
+  ): Promise<EnvsChanges> => {
+    const changes = await mapValuesAsync(sources, src => src.load({ ignoreFileChanges, changedFiles }))
     const buildResults = await buildMultiEnvState({ envChanges: changes, ignoreFileChanges })
     state = buildResults.state
     return buildResults.changes

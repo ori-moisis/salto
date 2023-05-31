@@ -17,7 +17,7 @@ import _ from 'lodash'
 // eslint-disable-next-line camelcase
 import { encoding_for_model, TiktokenModel } from '@dqbd/tiktoken'
 import { detailedCompare, invertNaclCase, walkOnElement, WALK_NEXT_STEP } from '@salto-io/adapter-utils'
-import { Change, ChangeDataType, DetailedChange, getChangeData, isAdditionChange, isElement, isInstanceElement, isModificationChange, isRemovalChange, ModificationChange, Value } from '@salto-io/adapter-api'
+import { Change, ChangeDataType, DetailedChange, getChangeData, isAdditionChange, isElement, isInstanceElement, isModificationChange, isObjectType, isRemovalChange, ModificationChange, Value } from '@salto-io/adapter-api'
 import { logger } from '@salto-io/logging'
 import { values } from '@salto-io/lowerdash'
 import { parser, nacl, staticFiles } from '@salto-io/workspace'
@@ -46,7 +46,13 @@ const dumpNacl = async (value: Value): Promise<string> => {
 
   let newData: string
   if (isElement(value)) {
-    newData = await parser.dumpElements([value], functions, 0)
+    if (isObjectType(value)) {
+      const clone = value.clone()
+      clone.annotationRefTypes = {}
+      newData = await parser.dumpElements([clone], functions, 0)
+    } else {
+      newData = await parser.dumpElements([value], functions, 0)
+    }
   } else {
     newData = await parser.dumpValues(value, functions, 0)
   }
@@ -159,13 +165,14 @@ const getReadableModificationDescription = async (
 type FormatChangesOptions = {
   maxTokens?: number
   modelName?: TiktokenModel
+  regexToFilterOut?: string[]
 }
-const FORMAT_CHANGES_DEFAULT_OPTIONS: Required<FormatChangesOptions> = {
+const FORMAT_CHANGES_DEFAULT_OPTIONS = {
   maxTokens: 3500,
-  modelName: 'gpt-3.5-turbo',
+  modelName: 'gpt-3.5-turbo' as const,
 }
 export const formatChangesForPrompt = async (changes: Change[], opts?: FormatChangesOptions): Promise<string[]> => {
-  const params = _.defaults({}, opts ?? {}, FORMAT_CHANGES_DEFAULT_OPTIONS)
+  const params = { ...FORMAT_CHANGES_DEFAULT_OPTIONS, ...opts }
   const encoding = encoding_for_model(params.modelName)
   const encodingLength = (text: string): number => encoding.encode(text).length
 
@@ -190,10 +197,12 @@ export const formatChangesForPrompt = async (changes: Change[], opts?: FormatCha
   const formattedModifications = await Promise.all(
     modifications.map(change => getReadableModificationDescription(change, params.maxTokens, encodingLength))
   )
+  log.debug('filtering out %o', params.regexToFilterOut)
   const formattedChanges = formattedAdditions
     .concat(formattedRemovals)
     .concat(formattedModifications)
     .filter(values.isDefined)
+    .map(changesStr => (params.regexToFilterOut ?? []).reduce((str, regex) => str.replace(new RegExp(regex, 'm'), ''), changesStr))
 
   const changeChunks = chunkBySoft(
     formattedChanges,

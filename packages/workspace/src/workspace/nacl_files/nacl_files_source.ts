@@ -95,6 +95,7 @@ export type NaclFile = {
 }
 export type SourceLoadParams = {
   ignoreFileChanges?: boolean
+  changedFiles?: Set<string>
 }
 
 export type NaclFilesSource<Changes=ChangeSet<Change>> = Omit<ElementsSource, 'clear'> & {
@@ -637,6 +638,7 @@ const buildNaclFilesSource = (
 
   const buildInitState = async (
     ignoreFileChanges = false,
+    changedFiles?: Set<string>,
   ): Promise<buildNaclFilesStateResult> => {
     const currentState = await createNaclFilesState(
       remoteMapCreator,
@@ -646,9 +648,17 @@ const buildNaclFilesSource = (
     )
     if (!ignoreFileChanges) {
       const preChangeHash = await currentState.parsedNaclFiles.getHash()
-      const cacheFilenames = await currentState.parsedNaclFiles.list()
+
+      const cacheFilenames = changedFiles === undefined
+        ? await currentState.parsedNaclFiles.list()
+        : (await currentState.parsedNaclFiles.list()).filter(name => changedFiles.has(name))
+
       const modifiedStaticFiles = await staticFilesSource.load?.() ?? []
-      const naclFilenames = new Set(await naclFilesStore.list())
+      const naclFilenames = new Set(
+        changedFiles === undefined
+          ? await naclFilesStore.list()
+          : (await naclFilesStore.list()).filter(name => changedFiles.has(name))
+      )
       const fileNames = new Set()
       const modifiedNaclFiles: NaclFile[] = []
       const naclReferencingModifiedStaticFiles = new Set(
@@ -703,10 +713,11 @@ const buildNaclFilesSource = (
   const buildNaclFilesStateInner = async (
     parsedNaclFiles: ParsedNaclFile[] = [],
     ignoreFileChanges = false,
+    changedFiles?: Set<string>,
   ):
   Promise<buildNaclFilesStateResult> => {
     if (_.isUndefined(state)) {
-      return buildInitState(ignoreFileChanges)
+      return buildInitState(ignoreFileChanges, changedFiles)
     }
     const current = await state
     return buildNaclFilesState({
@@ -1121,9 +1132,9 @@ const buildNaclFilesSource = (
     },
     isEmpty: () => naclFilesStore.isEmpty(),
     getElementsSource: async () => (await getState()).mergedElements,
-    load: async ({ ignoreFileChanges = false }: SourceLoadParams) => {
+    load: async ({ ignoreFileChanges = false, changedFiles }: SourceLoadParams) => {
       if (initChanges === undefined) {
-        const res = await buildNaclFilesStateInner([], ignoreFileChanges)
+        const res = await buildNaclFilesStateInner([], ignoreFileChanges, changedFiles)
         state = Promise.resolve(res.state)
         initChanges = res.changes
       }

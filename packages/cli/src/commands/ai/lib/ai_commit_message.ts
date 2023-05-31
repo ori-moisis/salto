@@ -26,7 +26,7 @@ const log = logger(module)
 // TODO: make this not global
 const configuration = new Configuration({ apiKey: process.env.OPENAI_API_KEY })
 const openai = new OpenAIApi(configuration)
-const clientQueue = new Bottleneck({ maxConcurrent: 2 })
+const clientQueue = new Bottleneck({ maxConcurrent: 4 })
 // TODO: fill this information and move it somewhere else
 const MODEL_TOKEN_LIMIT: Partial<Record<TiktokenModel, number>> = {
   'gpt-3.5-turbo': 4000,

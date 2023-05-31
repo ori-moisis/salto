@@ -16,6 +16,7 @@
 import fs from 'fs'
 import simpleGit from 'simple-git'
 import { collections } from '@salto-io/lowerdash'
+import { getChangeData } from '@salto-io/adapter-api'
 import { CommandDefAction, createPublicCommandDef } from '../../command_builder'
 import { CliExitCode } from '../../types'
 import { getSemanticChanges } from './lib/semantic_changes'
@@ -31,10 +32,12 @@ type CreateSemanticDiffsArgs = {
   outputFolder: string
   repoFolder: string
   maxTokens: string
+  typesToIgnore?: string[]
+  regexToFilterOut?: string[]
 }
 
 const createSemanticDiffsAction: CommandDefAction<CreateSemanticDiffsArgs> = async ({ input, output }) => {
-  const { branchName, baseCommit, outputFolder, repoFolder, maxTokens } = input
+  const { branchName, baseCommit, outputFolder, repoFolder, maxTokens, regexToFilterOut, typesToIgnore } = input
 
   const numMaxTokens = Number(maxTokens)
   if (Number.isNaN(numMaxTokens)) {
@@ -52,7 +55,13 @@ const createSemanticDiffsAction: CommandDefAction<CreateSemanticDiffsArgs> = asy
   await awu(reversedCommits).forEach(async (commit, idx) => {
     outputLine(`handling commit ${commit.hash}`, output)
     const changes = await getSemanticChanges({ git, repoFolder, fromCommit: prevCommit, toCommit: commit.hash })
-    const formattedChanges = await formatChangesForPrompt(changes, { maxTokens: numMaxTokens })
+    const filteredChanges = changes.filter(
+      change => !(typesToIgnore ?? []).includes(getChangeData(change).elemID.typeName)
+    )
+    const formattedChanges = await formatChangesForPrompt(
+      filteredChanges,
+      { maxTokens: numMaxTokens, regexToFilterOut },
+    )
     formattedChanges.forEach((part, partIdx) => {
       fs.writeFileSync(`${outputFolder}/${idx.toString().padStart(3, '0')}_${commit.hash}_part${partIdx}.txt`, part)
     })
@@ -96,6 +105,16 @@ export const createSemanticDiffsCommand = createPublicCommandDef({
         type: 'string',
         description: 'max token length of any single diff file',
         default: '3500',
+      },
+      {
+        name: 'typesToIgnore',
+        alias: 'i',
+        type: 'stringsList',
+      },
+      {
+        name: 'regexToFilterOut',
+        alias: 'e',
+        type: 'stringsList',
       },
     ],
   },

@@ -331,6 +331,7 @@ export const loadWorkspace = async (
   ignoreFileChanges = false,
   persistent = true,
   mergedRecoveryMode: MergedRecoveryMode = 'rebuild',
+  changedFiles?: Set<string>,
   changesCallback?: (changes: Change[]) => void,
 ): Promise<Workspace> => {
   const workspaceConfig = await config.getWorkspaceConfig()
@@ -494,7 +495,11 @@ export const loadWorkspace = async (
       ? await workspaceState
       : await initState()
 
-    if (ignoreFileChanges) {
+    if (changesCallback) {
+      changesCallback(workspaceChanges[currentEnv()]?.changes ?? [])
+    }
+
+    if (ignoreFileChanges || changedFiles !== undefined) {
       // Skip all updates to the state since this flag means we are operating under the assumption
       // that everything is already up to date and no action is required
       return stateToBuild
@@ -721,9 +726,9 @@ export const loadWorkspace = async (
         changeResult.cacheValid,
       )
 
-      if (changesCallback !== undefined) {
-        changesCallback(changes)
-      }
+      // if (changesCallback !== undefined) {
+      //   changesCallback(changes)
+      // }
 
       if (validate) {
         const changedElements = changes
@@ -769,7 +774,7 @@ export const loadWorkspace = async (
     if (_.isUndefined(workspaceState)) {
       const wsConfig = await config.getWorkspaceConfig()
       log.debug('No workspace state for %s/%s. Building new workspace state.', wsConfig.uid, wsConfig.name)
-      const workspaceChanges = await naclFilesSource.load({ ignoreFileChanges })
+      const workspaceChanges = await naclFilesSource.load({ ignoreFileChanges, changedFiles })
       workspaceState = buildWorkspaceState({
         workspaceChanges,
       })

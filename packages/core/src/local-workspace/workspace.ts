@@ -251,6 +251,7 @@ type LoadLocalWorkspaceArgs = {
   persistent?: boolean
   stateStaticFilesSource?: staticFiles.StateStaticFilesSource
   credentialSource?: cs.ConfigSource
+  changedFiles?: string[]
   changesCallback?: (changes: Change[]) => void
 }
 
@@ -260,6 +261,7 @@ const loadLocalWorkspaceImpl = async ({
   persistent = true,
   credentialSource,
   stateStaticFilesSource,
+  changedFiles,
   changesCallback,
 }: LoadLocalWorkspaceArgs): Promise<Workspace> => {
   const baseDir = await locateWorkspaceRoot(path.resolve(lookupDir))
@@ -299,6 +301,7 @@ const loadLocalWorkspaceImpl = async ({
     false,
     persistent,
     'rebuild',
+    changedFiles !== undefined ? new Set(changedFiles) : undefined,
     changesCallback,
   )
 
