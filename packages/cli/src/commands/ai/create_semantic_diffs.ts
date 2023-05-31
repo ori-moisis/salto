@@ -20,7 +20,7 @@ import { getChangeData } from '@salto-io/adapter-api'
 import { CommandDefAction, createPublicCommandDef } from '../../command_builder'
 import { CliExitCode } from '../../types'
 import { getSemanticChanges } from './lib/semantic_changes'
-import { formatChangesForPrompt } from './lib/format_change'
+import { formatChangesForPrompt, FormatType, FormatTypeNames } from './lib/format_change'
 import { ensureDirExists } from './lib/file_operations'
 import { outputLine } from '../../outputer'
 
@@ -34,10 +34,20 @@ type CreateSemanticDiffsArgs = {
   maxTokens: string
   typesToIgnore?: string[]
   regexToFilterOut?: string[]
+  preferredFormat: FormatType
 }
 
 const createSemanticDiffsAction: CommandDefAction<CreateSemanticDiffsArgs> = async ({ input, output }) => {
-  const { branchName, baseCommit, outputFolder, repoFolder, maxTokens, regexToFilterOut, typesToIgnore } = input
+  const {
+    branchName,
+    baseCommit,
+    outputFolder,
+    repoFolder,
+    maxTokens,
+    regexToFilterOut,
+    typesToIgnore,
+    preferredFormat,
+  } = input
 
   const numMaxTokens = Number(maxTokens)
   if (Number.isNaN(numMaxTokens)) {
@@ -60,7 +70,7 @@ const createSemanticDiffsAction: CommandDefAction<CreateSemanticDiffsArgs> = asy
     )
     const formattedChanges = await formatChangesForPrompt(
       filteredChanges,
-      { maxTokens: numMaxTokens, regexToFilterOut },
+      { maxTokens: numMaxTokens, regexToFilterOut, preferredFormat },
     )
     formattedChanges.forEach((part, partIdx) => {
       fs.writeFileSync(`${outputFolder}/${idx.toString().padStart(3, '0')}_${commit.hash}_part${partIdx}.txt`, part)
@@ -105,6 +115,12 @@ export const createSemanticDiffsCommand = createPublicCommandDef({
         type: 'string',
         description: 'max token length of any single diff file',
         default: '3500',
+      },
+      {
+        name: 'preferredFormat',
+        alias: 'f',
+        type: 'string',
+        choices: FormatTypeNames,
       },
       {
         name: 'typesToIgnore',

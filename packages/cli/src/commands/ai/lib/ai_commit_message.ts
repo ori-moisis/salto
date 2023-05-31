@@ -26,43 +26,44 @@ const log = logger(module)
 // TODO: make this not global
 const configuration = new Configuration({ apiKey: process.env.OPENAI_API_KEY })
 const openai = new OpenAIApi(configuration)
-const clientQueue = new Bottleneck({ maxConcurrent: 4 })
+const clientQueue = new Bottleneck({ maxConcurrent: 10 })
 // TODO: fill this information and move it somewhere else
 const MODEL_TOKEN_LIMIT: Partial<Record<TiktokenModel, number>> = {
   'gpt-3.5-turbo': 4000,
 }
 
 
-const MAX_ATTEMPTS = 3
+const MAX_ATTEMPTS = 5
 const INITIAL_DELAY_SECONDS = 2
 
 const generateCompletion = (systemPrompt: string, userPrompt: string, maxTokens: number): Promise<string> => log.time(
   async () => {
-    const runCompletionWithBackOff = clientQueue.wrap(
-      async (attempt: number): Promise<ReturnType<typeof openai.createChatCompletion>> => {
-        try {
-          log.debug('Sending completion request attempt %d', attempt)
-          return await openai.createChatCompletion({
-            model: 'gpt-3.5-turbo',
-            messages: [
-              { role: 'system', content: systemPrompt },
-              { role: 'user', content: userPrompt },
-            ],
-            max_tokens: maxTokens,
-            temperature: 0,
-          })
-        } catch (e) {
-          if (attempt >= MAX_ATTEMPTS) {
-            throw e
-          }
-          const errorJson = e?.toJSON() ?? inspect(e)
-          log.warn('Completion request failed with error %s, delaying for %d seconds', errorJson, INITIAL_DELAY_SECONDS ** attempt)
-          await new Promise(resolve => setTimeout(resolve, (INITIAL_DELAY_SECONDS ** attempt) * 1000))
-          return runCompletionWithBackOff(attempt + 1)
+    const runCompletionWithBackOff = async (
+      attempt: number
+    ): Promise<ReturnType<typeof openai.createChatCompletion>> => {
+      try {
+        log.debug('Sending completion request attempt %d', attempt)
+        return await openai.createChatCompletion({
+          model: 'gpt-3.5-turbo',
+          messages: [
+            { role: 'system', content: systemPrompt },
+            { role: 'user', content: userPrompt },
+          ],
+          max_tokens: maxTokens,
+          temperature: 0,
+        })
+      } catch (e) {
+        if (attempt >= MAX_ATTEMPTS) {
+          throw e
         }
+        const errorJson = e?.toJSON() ?? inspect(e)
+        log.warn('Completion request failed with error %s, delaying for %d seconds', errorJson, INITIAL_DELAY_SECONDS ** attempt)
+        await new Promise(resolve => setTimeout(resolve, (INITIAL_DELAY_SECONDS ** attempt) * 1000))
+        return runCompletionWithBackOff(attempt + 1)
       }
-    )
-    const completion = await runCompletionWithBackOff(1)
+    }
+
+    const completion = await clientQueue.wrap(runCompletionWithBackOff)(1)
     return completion.data.choices[0].message?.content ?? ''
   },
   'Generate completion from openai',
@@ -93,7 +94,7 @@ const reduceSummary = async (
   const summaryChunks = chunkBySoft(summaries, modelMaxTokens - summaryMaxTokens, encodingLength)
   log.debug('Reducing %d summaries down to %d', summaries.length, summaryChunks.length)
   const results = await Promise.all(
-    summaryChunks.map(chunk => generateCompletion(chunk.join('\n\n'), prompt, summaryMaxTokens))
+    summaryChunks.map(chunk => generateCompletion(prompt, chunk.join('\n\n'), summaryMaxTokens))
   )
   if (results.length === 1) {
     return { message: results[0], steps: [] }
@@ -111,7 +112,7 @@ export const getCommitMessageForChanges = async (
 ): Promise<GetCommitMessageForChangesResult> => {
   log.debug('Generating messages for %d change descriptions', changes.length)
   const commitMessages = await Promise.all(
-    changes.map(chunk => generateCompletion(chunk, promptForCommit, maxTokens))
+    changes.map(chunk => generateCompletion(promptForCommit, chunk, maxTokens))
   )
   if (commitMessages.length === 1) {
     return { message: commitMessages[0], steps: commitMessages }

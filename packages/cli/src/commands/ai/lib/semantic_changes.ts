@@ -17,12 +17,14 @@ import _ from 'lodash'
 import fs from 'fs'
 import simpleGit, { SimpleGit } from 'simple-git'
 import { closeAllRemoteMaps, loadLocalWorkspace } from '@salto-io/core'
+import { logger } from '@salto-io/logging'
 import { Change } from '@salto-io/adapter-api'
 import { collections } from '@salto-io/lowerdash'
 import { listDir } from './file_operations'
 import { resetBranchToCommit } from './git_operations'
 
 const { awu } = collections.asynciterable
+const log = logger(module)
 
 type GetSemanticChangesArgs = {
   git: SimpleGit
@@ -35,9 +37,14 @@ export const getSemanticChanges = async (
 ): Promise<Change[]> => {
   const relevantFiles = (await git.raw('diff', '--name-only', fromCommit, toCommit))
     .split('\n')
-    .map(name => name.split('/').slice(2).join('/')) // Remove envs/<env name>/ from the path
+    .map(name => (
+      // Remove envs/<env name>/ from the path if needed
+      name.startsWith('envs/')
+        ? name.split('/').slice(2).join('/')
+        : name
+    ))
 
-
+  log.debug('Relevant files: %s', relevantFiles.join(','))
   await git.checkout(fromCommit)
 
   // Checkout state file from the target commit already to avoid invalidating everything
@@ -60,6 +67,9 @@ export const getSemanticChanges = async (
   const wsAfter = await loadLocalWorkspace({ path: repoFolder, changesCallback, changedFiles: relevantFiles })
   await wsAfter.flush() // Must call flush to trigger the actual loading
   await closeAllRemoteMaps()
+
+  log.debug('Got %d changes', changes.length)
+
   return changes
 }
 

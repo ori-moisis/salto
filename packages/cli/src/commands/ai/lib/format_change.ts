@@ -17,7 +17,7 @@ import _ from 'lodash'
 // eslint-disable-next-line camelcase
 import { encoding_for_model, TiktokenModel } from '@dqbd/tiktoken'
 import { detailedCompare, invertNaclCase, walkOnElement, WALK_NEXT_STEP } from '@salto-io/adapter-utils'
-import { Change, ChangeDataType, DetailedChange, getChangeData, isAdditionChange, isElement, isInstanceElement, isModificationChange, isObjectType, isRemovalChange, ModificationChange, Value } from '@salto-io/adapter-api'
+import { Change, ChangeDataType, DetailedChange, Element, getChangeData, isAdditionChange, isElement, isModificationChange, isObjectType, isRemovalChange, ModificationChange, Value } from '@salto-io/adapter-api'
 import { logger } from '@salto-io/logging'
 import { values } from '@salto-io/lowerdash'
 import { parser, nacl, staticFiles } from '@salto-io/workspace'
@@ -25,20 +25,17 @@ import { chunkBySoft } from './utils'
 
 const log = logger(module)
 
-// TODO: once we have aliases, use aliases
-const getReadableName = (elem: ChangeDataType): string => {
-  const typeName = invertNaclCase(elem.elemID.typeName)
-  if (isInstanceElement(elem)) {
-    // const instName = (
-    //   elem.annotations[INSTANCE_ANNOTATIONS.ALIAS]
-    //   || elem.value.name
-    //   || elem.value.Name
-    //   || invertNaclCase(elem.elemID.name)
-    // )
-    return `"${typeName}.${invertNaclCase(elem.elemID.name)}"`
-  }
-  return typeName
+// TODO: once we have important attributes, use them instead of this hard coded list
+const IMPORTANT_ATTRS: Record<string, string[]> = {
+  jira: ['name', 'key', 'state', 'enabled', 'projectTypeKey', 'description', 'projects'],
+  salesforce: ['name', 'label', 'apiName', 'fullName', 'description', 'helptext'],
+  netsuite: ['label', 'name', 'title', 'recordname', 'isinactive', 'recordtype', 'selectrecordtype', 'isprivate', 'preferred', 'ismandatory', 'description'],
 }
+
+// TODO: once we have aliases, use aliases
+const getReadableName = (elem: Element): string => (
+  `${invertNaclCase(elem.elemID.typeName)}.${invertNaclCase(elem.elemID.name)}`
+)
 
 const dumpNacl = async (value: Value): Promise<string> => {
   const dummyStaticFileSource = staticFiles.buildInMemStaticFilesSource()
@@ -53,6 +50,8 @@ const dumpNacl = async (value: Value): Promise<string> => {
     } else {
       newData = await parser.dumpElements([value], functions, 0)
     }
+    // Re-format first line to match element ID formatting
+    newData = `${getReadableName(value)}:\n${newData.split('\n').slice(1).join('\n')}`
   } else {
     newData = await parser.dumpValues(value, functions, 0)
   }
@@ -65,34 +64,79 @@ const indent = (text: string, level: number, opts: { prefix: string } = { prefix
   return text.split('\n').map(line => `${opts.prefix}${indentText}${line}`).join('\n')
 }
 
+const removeBracketLines = (dumpedObject: string): string => (
+  // We remove the first line that has the opening bracket and the last line to ignore the closing bracket,
+  dumpedObject.split('\n').slice(1, -1).join('\n')
+)
+
+const dumpImportantValues = async (element: Element, idsToSkip: Set<string>): Promise<string> => {
+  const importantValues = {}
+  walkOnElement({
+    element,
+    func: ({ value, path }) => {
+      if (
+        // We assume important attributes are always at the first nesting level
+        (IMPORTANT_ATTRS[path.adapter] ?? []).includes(path.createBaseID().path[0])
+        && !idsToSkip.has(path.getFullName())
+      ) {
+        _.set(importantValues, path.createBaseID().path, value)
+        return WALK_NEXT_STEP.SKIP
+      }
+      return WALK_NEXT_STEP.RECURSE
+    },
+  })
+  return _.isEmpty(importantValues) ? '' : removeBracketLines(await dumpNacl(importantValues)).concat('\n')
+}
+
+export type FormatType = 'full' | 'important' | 'key'
+export const FormatTypeNames: FormatType[] = ['full', 'important', 'key']
+
+
+export const isFormatType = (str: string): str is FormatType => (
+  FormatTypeNames.includes(str as FormatType)
+)
 
 type EncodingLen = (text: string) => number
+const dumpValueInFormat = async (
+  key: string,
+  value: Value,
+  format: FormatType,
+  maxLength: number,
+  encodingLength: EncodingLen,
+): Promise<string> => {
+  if (format === 'full') {
+    let dumpedValue = await dumpNacl(value)
+    if (!isElement(value)) {
+      dumpedValue = `${key} = ${dumpedValue}`
+    }
+    if (encodingLength(dumpedValue) < maxLength) {
+      return dumpedValue
+    }
+  }
+  if (format === 'important' || format === 'full') {
+    if (isElement(value)) {
+      const dumpedValue = `${key}:\n${await dumpImportantValues(value, new Set())}`
+      if (encodingLength(dumpedValue) < maxLength) {
+        return dumpedValue
+      }
+    }
+  }
+  return key
+}
+
 const getReadableDescriptionOfDetailedChange = async (
   detailedChange: DetailedChange,
   maxValueLength: number,
+  preferredFormat: FormatType,
   encodingLength: EncodingLen,
 ): Promise<string | undefined> => {
   const pathInBaseID = detailedChange.id.createBaseID().path
   const changeKey = pathInBaseID.join('.') || getReadableName(getChangeData(detailedChange))
   if (isAdditionChange(detailedChange)) {
-    const dumpedValue = await dumpNacl(detailedChange.data.after)
-    const fullChangeString = isElement(detailedChange.data.after)
-      ? `Added:\n${indent(dumpedValue, 1)}`
-      : `Added: ${indent(`${changeKey} = ${dumpedValue}`, 1)}`
-    if (encodingLength(fullChangeString) < maxValueLength) {
-      return fullChangeString
-    }
-    return `Added ${changeKey}`
+    return `Added ${await dumpValueInFormat(changeKey, detailedChange.data.after, preferredFormat, maxValueLength, encodingLength)}`
   }
   if (isRemovalChange(detailedChange)) {
-    const dumpedValue = await dumpNacl(detailedChange.data.before)
-    const fullChangeString = isElement(detailedChange.data.before)
-      ? `Removed:\n${indent(dumpedValue, 1)}`
-      : `Removed: ${indent(`${changeKey} = ${dumpedValue}`, 1)}`
-    if (encodingLength(fullChangeString) < maxValueLength) {
-      return fullChangeString
-    }
-    return `Removed ${changeKey}`
+    return `Removed ${await dumpValueInFormat(changeKey, detailedChange.data.before, preferredFormat, maxValueLength, encodingLength)}`
   }
   if (isModificationChange(detailedChange)) {
     const dumpedBefore = await dumpNacl(detailedChange.data.before)
@@ -117,100 +161,114 @@ const getReadableDescriptionOfDetailedChange = async (
 }
 
 
-const IMPORTANT_ATTRS: Record<string, string[]> = {
-  jira: ['name', 'key', 'state', 'enabled', 'projectTypeKey'],
-  salesforce: ['name', 'label', 'apiName', 'fullName'],
-}
-
-const removeBracketLines = (dumpedObject: string): string => (
-  // We remove the first line that has the opening bracket and the last line to ignore the closing bracket,
-  dumpedObject.split('\n').slice(1, -1).join('\n')
-)
-
 const getReadableModificationDescription = async (
   change: ModificationChange<ChangeDataType>,
   dumpLimit: number,
+  preferredFormat: FormatType,
   encodingLength: EncodingLen,
 ): Promise<string> => {
   const changedElemName = getReadableName(change.data.after)
   const detailedChanges = detailedCompare(
     change.data.before,
     change.data.after,
-    { compareListItems: true, createFieldChanges: false },
+    { compareListItems: true, createFieldChanges: true },
   )
+
+  // TODO:ORI - in "important" mode, we should summarize the detailed changes more aggressively
+  //            currently we emit a line for every detailed change, we should group them at some level
+
   // Important attributes
   const detailedChangeIDs = new Set(detailedChanges.map(detailedChange => detailedChange.id.getFullName()))
-  const importantValues = {}
-  walkOnElement({
-    element: change.data.after,
-    func: ({ value, path }) => {
-      if (
-        (IMPORTANT_ATTRS[path.adapter] ?? []).includes(path.createBaseID().path[0])
-        && !detailedChangeIDs.has(path.getFullName())
-      ) {
-        _.set(importantValues, path.createBaseID().path, value)
-        return WALK_NEXT_STEP.SKIP
-      }
-      return WALK_NEXT_STEP.RECURSE
-    },
-  })
-  const dumpedImportant = _.isEmpty(importantValues) ? '' : removeBracketLines(await dumpNacl(importantValues)).concat('\n')
+  const dumpedImportant = await dumpImportantValues(change.data.after, detailedChangeIDs)
 
-  const dumpedChanges = await Promise.all(
-    detailedChanges.map(detailed => getReadableDescriptionOfDetailedChange(detailed, dumpLimit, encodingLength))
-  )
-  return `In ${changedElemName}:\n${dumpedImportant}${indent(dumpedChanges.filter(values.isDefined).join('\n'), 1)}`
+  const getChangeString = async (valueDumpLimit: number): Promise<string> => {
+    const dumpedChanges = await Promise.all(
+      detailedChanges.map(detailed => getReadableDescriptionOfDetailedChange(detailed, valueDumpLimit, 'full', encodingLength))
+    )
+    return `In ${changedElemName}:\n${dumpedImportant}${indent(dumpedChanges.filter(values.isDefined).join('\n'), 1)}`
+  }
+  const fullChangeString = await getChangeString(dumpLimit)
+  if (preferredFormat === 'full' && encodingLength(fullChangeString) < dumpLimit) {
+    return fullChangeString
+  }
+  // Too many changes in a single element, fallback to reporting the changes without the values
+  const changesStringWithoutValues = await getChangeString(0)
+  if (
+    (preferredFormat === 'full' || preferredFormat === 'important')
+    && encodingLength(changesStringWithoutValues) < dumpLimit
+  ) {
+    return changesStringWithoutValues
+  }
+  // Even reporting the internal IDs without values is not enough, so fallback to just saying "something changed"
+  return `Changed ${changedElemName}`
 }
 
 type FormatChangesOptions = {
   maxTokens?: number
   modelName?: TiktokenModel
   regexToFilterOut?: string[]
+  preferredFormat: FormatType
 }
 const FORMAT_CHANGES_DEFAULT_OPTIONS = {
   maxTokens: 3500,
-  modelName: 'gpt-3.5-turbo' as const,
-}
+  modelName: 'gpt-3.5-turbo',
+  preferredFormat: 'full',
+} as const
 export const formatChangesForPrompt = async (changes: Change[], opts?: FormatChangesOptions): Promise<string[]> => {
   const params = { ...FORMAT_CHANGES_DEFAULT_OPTIONS, ...opts }
   const encoding = encoding_for_model(params.modelName)
   const encodingLength = (text: string): number => encoding.encode(text).length
 
+  const getFormattedChanges = async (changesToFormat: Change[]): Promise<string[]> => {
+    const [removals, addOrModify] = _.partition(changesToFormat, isRemovalChange)
+    const [additions, modifications] = _.partition(addOrModify, isAdditionChange)
 
-  const [removals, addOrModify] = _.partition(changes, isRemovalChange)
-  const [additions, modifications] = _.partition(addOrModify, isAdditionChange)
+    const formattedAdditions = await Promise.all(
+      additions.map(change => getReadableDescriptionOfDetailedChange(
+        { ...change, id: change.data.after.elemID },
+        params.maxTokens,
+        params.preferredFormat,
+        encodingLength,
+      ))
+    )
+    const formattedRemovals = await Promise.all(
+      removals.map(change => getReadableDescriptionOfDetailedChange(
+        { ...change, id: change.data.before.elemID },
+        params.maxTokens,
+        params.preferredFormat,
+        encodingLength,
+      ))
+    )
+    const formattedModifications = await Promise.all(
+      modifications.map(change => getReadableModificationDescription(
+        change,
+        params.maxTokens,
+        params.preferredFormat,
+        encodingLength,
+      ))
+    )
 
-  const formattedAdditions = await Promise.all(
-    additions.map(change => getReadableDescriptionOfDetailedChange(
-      { ...change, id: change.data.after.elemID },
-      params.maxTokens,
-      encodingLength,
-    ))
+    return formattedAdditions
+      .concat(formattedRemovals)
+      .concat(formattedModifications)
+      .filter(values.isDefined)
+      .map(changesStr => (params.regexToFilterOut ?? []).reduce((str, regex) => str.replace(new RegExp(regex, 'm'), ''), changesStr))
+  }
+
+
+  // Sort changes by typename first, then type of change
+  const formattedChanges = await Promise.all(
+    Object.values(_.groupBy(changes, change => getChangeData(change).elemID.typeName))
+      .map(getFormattedChanges)
   )
-  const formattedRemovals = await Promise.all(
-    removals.map(change => getReadableDescriptionOfDetailedChange(
-      { ...change, id: change.data.before.elemID },
-      params.maxTokens,
-      encodingLength,
-    ))
-  )
-  const formattedModifications = await Promise.all(
-    modifications.map(change => getReadableModificationDescription(change, params.maxTokens, encodingLength))
-  )
-  log.debug('filtering out %o', params.regexToFilterOut)
-  const formattedChanges = formattedAdditions
-    .concat(formattedRemovals)
-    .concat(formattedModifications)
-    .filter(values.isDefined)
-    .map(changesStr => (params.regexToFilterOut ?? []).reduce((str, regex) => str.replace(new RegExp(regex, 'm'), ''), changesStr))
 
   const changeChunks = chunkBySoft(
-    formattedChanges,
+    formattedChanges.flat(),
     params.maxTokens,
     formattedChange => encodingLength(formattedChange),
   )
 
-  const formattedChunks = changeChunks.map(chunk => chunk.join('\n\n'))
+  const formattedChunks = changeChunks.map(chunk => chunk.join('\n'))
   log.debug('Formatted changes token lengths: %s', formattedChunks.map(encodingLength).join('\n'))
   return formattedChunks
 }
