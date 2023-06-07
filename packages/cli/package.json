@@ -56,7 +56,7 @@
     "lodash": "^4.17.21",
     "moment": "^2.24.0",
     "open": "^7.2.0",
-    "openai": "^3.2.1",
+    "openai": "^3.3.0",
     "ora": "^4.0.3",
     "package": "^1.0.1",
     "pietile-eventemitter": "^1.0.0",

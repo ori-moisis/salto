@@ -17,13 +17,14 @@ import _ from 'lodash'
 // eslint-disable-next-line camelcase
 import { encoding_for_model, TiktokenModel } from '@dqbd/tiktoken'
 import { detailedCompare, invertNaclCase, walkOnElement, WALK_NEXT_STEP } from '@salto-io/adapter-utils'
-import { Change, ChangeDataType, DetailedChange, Element, getChangeData, isAdditionChange, isElement, isModificationChange, isObjectType, isRemovalChange, ModificationChange, Value } from '@salto-io/adapter-api'
+import { Change, ChangeDataType, DetailedChange, Element, getChangeData, isAdditionChange, isElement, isModificationChange, isObjectType, isRemovalChange, ModificationChange, StaticFile, Value } from '@salto-io/adapter-api'
 import { logger } from '@salto-io/logging'
-import { values } from '@salto-io/lowerdash'
+import { values, collections } from '@salto-io/lowerdash'
 import { parser, nacl, staticFiles } from '@salto-io/workspace'
 import { chunkBySoft } from './utils'
 
 const log = logger(module)
+const { awu } = collections.asynciterable
 
 // TODO: once we have important attributes, use them instead of this hard coded list
 const IMPORTANT_ATTRS: Record<string, string[]> = {
@@ -38,7 +39,8 @@ const getReadableName = (elem: Element): string => (
 )
 
 const dumpNacl = async (value: Value): Promise<string> => {
-  const dummyStaticFileSource = staticFiles.buildInMemStaticFilesSource()
+  const files = new Map<string, StaticFile>()
+  const dummyStaticFileSource = staticFiles.buildInMemStaticFilesSource(files)
   const functions = nacl.getFunctions(dummyStaticFileSource)
 
   let newData: string
@@ -56,7 +58,15 @@ const dumpNacl = async (value: Value): Promise<string> => {
     newData = await parser.dumpValues(value, functions, 0)
   }
 
-  return newData.trimStart().trimEnd()
+  newData = newData.trimStart().trimEnd()
+
+  if (files.size > 0) {
+    await awu(files.values()).forEach(async file => {
+      newData += `\n\n${file.filepath}:\n${await file.getContent()}`
+    })
+  }
+
+  return newData
 }
 
 const indent = (text: string, level: number, opts: { prefix: string } = { prefix: '' }): string => {

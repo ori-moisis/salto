@@ -389,13 +389,13 @@ export const loadWorkspace = async (
             await remoteMapCreator<Element>({
               namespace: getRemoteMapNamespace('merged', envName),
               serialize: element => serialize([element], 'keepRef'),
-              // TODO: we might need to pass static file reviver to the deserialization func
               deserialize: s => deserializeSingleElement(
                 s,
                 async staticFile => await naclFilesSource.getStaticFile(
                   staticFile.filepath,
                   staticFile.encoding,
-                  envName
+                  envName,
+                  staticFile.hash,
                 ) ?? staticFile
               ),
               persistent,

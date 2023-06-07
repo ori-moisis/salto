@@ -117,7 +117,8 @@ export type MultiEnvSource = {
   getStaticFile: (
     filePath: string,
     encoding: BufferEncoding,
-    env: string
+    env: string,
+    hash?: string
   ) => Promise<StaticFile | undefined>
   getAll: (env: string) => Promise<AsyncIterable<Element>>
   promote: (
@@ -174,10 +175,11 @@ const buildMultiEnvSource = (
   const getStaticFile = async (
     filePath: string,
     encoding: BufferEncoding,
-    envName : string
+    envName : string,
+    hash?: string,
   ): Promise<StaticFile> => {
     const sourcesFiles = (await Promise.all(Object.values(getActiveSources(envName))
-      .map(src => src.getStaticFile(filePath, encoding))))
+      .map(src => src.getStaticFile(filePath, encoding, hash))))
       .filter(values.isDefined)
     if (sourcesFiles.length > 1
       && !_.every(sourcesFiles, sf => sf.hash === sourcesFiles[0].hash)) {
@@ -197,7 +199,8 @@ const buildMultiEnvSource = (
         async staticFile => await getStaticFile(
           staticFile.filepath,
           staticFile.encoding,
-          envName
+          envName,
+          staticFile.hash,
         ) ?? staticFile
       ),
       persistent,

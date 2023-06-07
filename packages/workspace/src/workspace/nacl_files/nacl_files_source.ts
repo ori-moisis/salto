@@ -126,6 +126,7 @@ export type NaclFilesSource<Changes=ChangeSet<Change>> = Omit<ElementsSource, 'c
   getStaticFile: (
     filePath: string,
     encoding: BufferEncoding,
+    hash?: string,
   ) => Promise<StaticFile | undefined>
   isPathIncluded: (filePath: string) => {included: boolean; isNacl?: boolean}
 }
@@ -311,7 +312,7 @@ const createNaclFilesState = async (
     serialize: async element => serialize([element], 'keepRef'),
     deserialize: async data => deserializeSingleElement(
       data,
-      async sf => staticFilesSource.getStaticFile(sf.filepath, sf.encoding)
+      async sf => staticFilesSource.getStaticFile(sf.filepath, sf.encoding, sf.hash)
     ),
     persistent,
   })),
@@ -546,6 +547,7 @@ const buildNaclFilesState = async ({
     currentErrors: currentState.mergeErrors,
     mergeFunc: elements => mergeElements(elements),
   }) as Change[]
+  log.debug('found %d changes in %d element IDs', changes.length, relevantElementIDs.length)
   const postChangeHash = await currentState.parsedNaclFiles.getHash()
   await Promise.all([
     updateIndex(
@@ -666,6 +668,13 @@ const buildNaclFilesSource = (
           .filter(values.isDefined)
           .flat()
       )
+      log.debug('naclFilenames: %s', Array.from(naclFilenames).join(','))
+      log.debug('cacheFilenames: %s', cacheFilenames.join(','))
+      log.debug('naclReferencingModifiedStaticFiles: %s', Array.from(naclReferencingModifiedStaticFiles).join(','))
+      naclReferencingModifiedStaticFiles.forEach(name => {
+        naclFilenames.add(name)
+        cacheFilenames.push(name)
+      })
       await withLimitedConcurrency(
         cacheFilenames.map(filename => async () => {
           const naclFile = (naclFilenames.has(filename) && await naclFilesStore.get(filename))
@@ -1142,8 +1151,8 @@ const buildNaclFilesSource = (
     },
     getSearchableNames: async (): Promise<string[]> =>
       (awu((await getState())?.searchableNamesIndex?.keys() ?? []).toArray()),
-    getStaticFile: async (filePath, encoding) => {
-      const staticFile = await staticFilesSource.getStaticFile(filePath, encoding)
+    getStaticFile: async (filePath, encoding, hash) => {
+      const staticFile = await staticFilesSource.getStaticFile(filePath, encoding, hash)
       if (isStaticFile(staticFile)) {
         return staticFile
       }

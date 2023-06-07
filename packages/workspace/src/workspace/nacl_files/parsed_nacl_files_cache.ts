@@ -127,7 +127,7 @@ const getCacheSources = async (
     serialize: async (elements: Element[]) => serialize(elements ?? [], 'keepRef'),
     deserialize: async data => (deserialize(
       data,
-      async sf => staticFilesSource.getStaticFile(sf.filepath, sf.encoding),
+      async sf => staticFilesSource.getStaticFile(sf.filepath, sf.encoding, sf.hash),
     )),
     persistent,
   }),

@@ -121,6 +121,7 @@ export const createSemanticDiffsCommand = createPublicCommandDef({
         alias: 'f',
         type: 'string',
         choices: FormatTypeNames,
+        default: 'full',
       },
       {
         name: 'typesToIgnore',
