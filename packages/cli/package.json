@@ -47,6 +47,7 @@
     "@salto-io/workspace": "0.3.52",
     "chalk": "^2.4.2",
     "commander": "^10.0.0",
+    "csv-writer": "^1.6.0",
     "express": "^4.17.1",
     "figlet": "^1.2.4",
     "glob": "^7.1.6",
@@ -59,6 +60,7 @@
     "pietile-eventemitter": "^1.0.0",
     "semver": "^7.3.2",
     "source-map-support": "^0.5.13",
+    "uuid": "^8.3.0",
     "wu": "^2.1.0"
   },
   "devDependencies": {

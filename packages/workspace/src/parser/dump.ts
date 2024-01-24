@@ -221,3 +221,8 @@ export const dumpValues = async (
   const valueWithSerializedFunctions = defaultParent[defaultKey]
   return dumpValue(valueWithSerializedFunctions, indentationLevel).join('\n').concat('\n')
 }
+
+// TODO: do not export this
+export const dumpValueSync = (value: unknown, indentationLevel = 0): string => (
+  dumpValue(value, indentationLevel).join('\n')
+)

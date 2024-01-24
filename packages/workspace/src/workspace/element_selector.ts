@@ -14,17 +14,23 @@
 * limitations under the License.
 */
 import _ from 'lodash'
-import { ElemID, ElemIDTypes, Value, ElemIDType, isObjectType } from '@salto-io/adapter-api'
+import { ElemID, ElemIDTypes, Value, ElemIDType, isObjectType, ReadOnlyElementsSource, Element, isInstanceElement, isPrimitiveValue } from '@salto-io/adapter-api'
 import { walkOnElement, WalkOnFunc, WALK_NEXT_STEP } from '@salto-io/adapter-utils'
 import { logger } from '@salto-io/logging'
 import { collections, promises } from '@salto-io/lowerdash'
 import { ElementsSource } from './elements_source'
 import { ReadOnlyRemoteMap } from './remote_map'
+import { dumpValueSync } from '../parser'
 
 const { withLimitedConcurrency } = promises.array
-const { asynciterable } = collections
-const { awu } = asynciterable
+const { awu } = collections.asynciterable
+const { makeArray } = collections.array
 const log = logger(module)
+
+type ValueSelector = {
+  field: string
+  value: RegExp
+}
 
 type FlatElementSelector = {
   adapterSelector: RegExp
@@ -33,6 +39,7 @@ type FlatElementSelector = {
   nameSelectors?: RegExp[]
   caseInsensitive?: boolean
   origin: string
+  value?: ValueSelector[]
 }
 
 export type ElementSelector = FlatElementSelector & {
@@ -44,9 +51,18 @@ export type ElementIDToValue = {
   element: Value
 }
 
-type ElementIDContainer = {
-  elemID: ElemID
-}
+const isWildcardSelector = (selector: string): boolean => selector.includes('*')
+
+const hasReferencedBy = (
+  selector: ElementSelector
+): selector is ElementSelector & Required<Pick<ElementSelector, 'referencedBy'>> =>
+  selector.referencedBy !== undefined
+
+const hasValueFilter = (
+  selector: ElementSelector
+): selector is ElementSelector & Required<Pick<ElementSelector, 'value'>> => (
+  selector.value !== undefined
+)
 
 // get the full name including handling for settings instances ('_config')
 const getElemIDFullNameParts = (elemID: ElemID): string[] => {
@@ -74,35 +90,95 @@ const match = (elemId: ElemID, selector: ElementSelector, includeNested = false)
     includeNested
   )
 
-const matchWithReferenceBy = async (
-  elemId: ElemID,
-  selector: ElementSelector,
-  referenceSourcesIndex: ReadOnlyRemoteMap<ElemID[]>,
-  includeNested = false
-): Promise<boolean> => {
-  const { referencedBy } = selector
-  return match(elemId, selector, includeNested)
-    && (referencedBy === undefined
-      || (await referenceSourcesIndex.get(
-        (selector.idTypeSelector === 'field' ? elemId.createBaseID() : elemId.createTopLevelParentID()).parent.getFullName()
-      ) ?? [])
-        .some(id => match(id, referencedBy, true)))
+const getReferenceSourceKey = (elemId: ElemID, selector: Pick<ElementSelector, 'idTypeSelector'>): ElemID => (
+  selector.idTypeSelector === 'field'
+    ? elemId.createBaseID().parent
+    : elemId.createTopLevelParentID().parent
+)
+
+const getValueOrValues = (value: Value, path: string[]): Value | Value[] => {
+  if (path.length === 0) {
+    return value
+  }
+  const [currPart, ...restOfPath] = path
+  if (currPart.includes('*')) {
+    if (Array.isArray(value) && currPart === '*') {
+      return value.flatMap(item => getValueOrValues(item, restOfPath))
+    }
+    if (_.isPlainObject(value)) {
+      return Object.entries(value)
+        // eslint-disable-next-line no-use-before-define
+        .filter(([key]) => createRegex(currPart, true).test(key))
+        .flatMap(([_key, item]) => getValueOrValues(item, restOfPath))
+    }
+  }
+  if (Array.isArray(value)) {
+    // Special case - we assume that if we get an array and the curr path is not "*"
+    // we actually want to behave as if it is "*" and dive into the array
+    return value.flatMap(item => getValueOrValues(item, path))
+  }
+  const currValue = _.get(value, currPart)
+  return getValueOrValues(currValue, restOfPath)
 }
 
+const matchValue = (value: Value, pattern: RegExp, path: string): boolean => {
+  const valuesToMatch = makeArray(getValueOrValues(value, path.split('.')))
+    .map(item => (isPrimitiveValue(item) ? _.toString(item) : dumpValueSync(item)))
+  const res = valuesToMatch.some(item => pattern.test(item))
+  log.debug('match pattern %s to values %o res=%s', pattern.source, valuesToMatch, res)
+  return res
+}
+
+type MatchWithValueArgs = {
+  elemId: ElemID
+  selector: ElementSelector
+  elementSource?: ReadOnlyElementsSource
+  referenceSourcesIndex: ReadOnlyRemoteMap<ElemID[]>
+  element?: Element
+  includeNested?: boolean
+}
+const matchWithValue = async ({
+  elemId, selector, elementSource, referenceSourcesIndex, element, includeNested = false,
+}: MatchWithValueArgs): Promise<boolean> => {
+  if (!match(elemId, selector, includeNested)) {
+    return false
+  }
+  if (hasValueFilter(selector)) {
+    if (elementSource === undefined) {
+      throw new Error('Must provide element source when selector has a value filter')
+    }
+    const elem = element ?? await elementSource.get(elemId)
+    const valueMatch = selector.value.every(({ field, value }) => (
+      matchValue(isInstanceElement(elem) ? elem.value : elem.annotations, value, field)
+    ))
+    if (!valueMatch) {
+      return false
+    }
+  }
+  if (hasReferencedBy(selector)) {
+    const idsOfReferringElements = await referenceSourcesIndex.get(
+      getReferenceSourceKey(elemId, selector).getFullName()
+    )
+    const isReferenceMatch = await awu(idsOfReferringElements ?? [])
+      .some(async id => (
+        matchWithValue({
+          elemId: id,
+          selector,
+          elementSource,
+          referenceSourcesIndex,
+          includeNested,
+        })
+      ))
+    if (!isReferenceMatch) {
+      return false
+    }
+  }
+  return true
+}
 
 const createRegex = (selector: string, caseInSensitive: boolean): RegExp => new RegExp(
   `^(${selector.replace(/\*/g, '[^\\.]*')})$`, caseInSensitive ? 'i' : undefined
 )
-
-/* eslint-disable-next-line @typescript-eslint/no-explicit-any */
-function isElementContainer(value: any): value is ElementIDContainer {
-  return value && value.elemID && value.elemID instanceof ElemID
-}
-
-const isWildcardSelector = (selector: string): boolean => selector.includes('*')
-
-const hasReferencedBy = (selector: ElementSelector): boolean =>
-  selector.referencedBy !== undefined
 
 export const validateSelectorsMatches = (selectors: ElementSelector[],
   matches: Record<string, boolean>): void => {
@@ -136,26 +212,23 @@ export const selectElementsBySelectorsWithoutReferences = (
 
 export const selectElementsBySelectors = (
   {
-    elementIds, selectors, referenceSourcesIndex, includeNested = false,
+    elementIds, selectors, referenceSourcesIndex, elementSource, includeNested = false,
   }: {
     elementIds: AsyncIterable<ElemID>
     selectors: ElementSelector[]
     referenceSourcesIndex: ReadOnlyRemoteMap<ElemID[]>
+    elementSource?: ReadOnlyElementsSource
     includeNested?: boolean
   }
 ): AsyncIterable<ElemID> => {
   if (selectors.length === 0) {
     return elementIds
   }
-  return awu(elementIds).filter(obj => awu(selectors).some(
-    selector =>
-      (matchWithReferenceBy(
-        isElementContainer(obj) ? obj.elemID : obj as ElemID,
-        selector,
-        referenceSourcesIndex,
-        includeNested
-      ))
-  ))
+  return awu(elementIds)
+    .filter(
+      elemId => awu(selectors)
+        .some(selector => matchWithValue({ elemId, selector, referenceSourcesIndex, elementSource, includeNested }))
+    )
 }
 
 const getIDType = (adapterSelector: string, idTypeSelector?: string): ElemIDType =>
@@ -260,9 +333,9 @@ const isBaseIdSelector = (selector: ElementSelector): boolean =>
 const validateSelector = (
   selector: ElementSelector,
 ): void => {
-  if (hasReferencedBy(selector)) {
+  if (hasReferencedBy(selector) || hasValueFilter(selector)) {
     if (!isBaseIdSelector(selector)) {
-      throw new Error(`Unsupported selector: referencedBy is only supported for selector of base ids (types, fields or instances), received: ${selector.origin}`)
+      throw new Error(`Unsupported selector: referencedBy or value filters only supported for selector of base ids (types, fields or instances), received: ${selector.origin}`)
     }
   }
 }
@@ -283,7 +356,7 @@ export const selectElementIdsByTraversal = async ({
   (log.time(
     async () => {
       const determinedSelectors = selectors.filter(selector =>
-        !isWildcardSelector(selector.origin) && !hasReferencedBy(selector))
+        !isWildcardSelector(selector.origin) && !hasReferencedBy(selector) && !hasValueFilter(selector))
       if (determinedSelectors.length === selectors.length) {
         return awu(determinedSelectors).map(selector => ElemID.fromFullName(selector.origin))
       }
@@ -302,6 +375,7 @@ export const selectElementIdsByTraversal = async ({
           elementIds: awu(await source.list()),
           selectors: topLevelSelectors,
           referenceSourcesIndex,
+          elementSource: source,
         })).toArray()
       }
 
@@ -316,15 +390,16 @@ export const selectElementIdsByTraversal = async ({
         elementIds: awu(await source.list()),
         selectors: possibleParentSelectors,
         referenceSourcesIndex,
+        elementSource: source,
       })).toArray()
       const stillRelevantIDs = compact
         ? possibleParentIDs.filter(id => !currentIds.has(id.getFullName()))
         : possibleParentIDs
 
       const [
-        subSelectorsWithReferencedBy,
-        subSelectorsWithoutReferencedBy,
-      ] = _.partition(subElementSelectors, hasReferencedBy)
+        subSelectorByValue,
+        subSelectorByID,
+      ] = _.partition(subElementSelectors, selector => hasReferencedBy(selector) || hasValueFilter(selector))
 
       const subElementIDs = new Set<string>()
       const selectFromSubElements: WalkOnFunc = ({ path }) => {
@@ -332,7 +407,7 @@ export const selectElementIdsByTraversal = async ({
           return WALK_NEXT_STEP.RECURSE
         }
 
-        if (subSelectorsWithoutReferencedBy.some(selector => match(path, selector))) {
+        if (subSelectorByID.some(selector => match(path, selector))) {
           subElementIDs.add(path.getFullName())
           if (compact) {
             return WALK_NEXT_STEP.SKIP
@@ -354,12 +429,18 @@ export const selectElementIdsByTraversal = async ({
         walkOnElement({
           element, func: selectFromSubElements,
         })
-        if (isObjectType(element) && subSelectorsWithReferencedBy.length > 0) {
+        if (isObjectType(element) && subSelectorByValue.length > 0) {
           await awu(Object.values(element.fields)).forEach(async field => {
             // Since we only support referenceBy on a base elemID, a selector
             // that is not top level and that has referenceBy is necessarily a field selector
-            if (await awu(subSelectorsWithReferencedBy).some(
-              selector => matchWithReferenceBy(field.elemID, selector, referenceSourcesIndex)
+            if (await awu(subSelectorByValue).some(
+              selector => matchWithValue({
+                elemId: field.elemID,
+                element: field,
+                selector,
+                referenceSourcesIndex,
+                elementSource: source,
+              })
             )) {
               subElementIDs.add(field.elemID.getFullName())
             }
