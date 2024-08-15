@@ -6,8 +6,12 @@
  * CERTAIN THIRD PARTY SOFTWARE MAY BE CONTAINED IN PORTIONS OF THE SOFTWARE. See NOTICE FILE AT https://github.com/salto-io/salto/blob/main/NOTICES
  */
 import { EOL } from 'os'
-import { cleanWorkspace } from '@salto-io/core'
-import { ProviderOptionsS3, StateConfig, WorkspaceComponents } from '@salto-io/workspace'
+import _ from 'lodash'
+import { cleanWorkspace, createRemoteMapCreator, loadLocalWorkspace } from '@salto-io/core'
+import { collections, values } from '@salto-io/lowerdash'
+import { safeJsonStringify } from '@salto-io/adapter-utils'
+import { nacl, ProviderOptionsS3, serialization, StateConfig, WorkspaceComponents } from '@salto-io/workspace'
+import { isElement } from '@salto-io/adapter-api'
 import { getUserBooleanInput } from '../callbacks'
 import {
   header,
@@ -20,7 +24,15 @@ import {
 import { outputLine, errorOutputLine } from '../outputer'
 import Prompts from '../prompts'
 import { CliExitCode } from '../types'
-import { createCommandGroupDef, createWorkspaceCommand, WorkspaceCommandAction } from '../command_builder'
+import {
+  CommandDefAction,
+  createCommandGroupDef,
+  createPublicCommandDef,
+  createWorkspaceCommand,
+  WorkspaceCommandAction,
+} from '../command_builder'
+
+const { awu } = collections.asynciterable
 
 type CleanArgs = {
   force: boolean
@@ -137,12 +149,114 @@ const cacheUpdateDef = createWorkspaceCommand({
   action: cacheUpdateAction,
 })
 
+type CacheVerifyArgs = {
+  cacheDir: string
+  Fix: boolean
+}
+const cacheVerifyAction: CommandDefAction<CacheVerifyArgs> = async ({ workspacePath, input, output }) => {
+  // Making sure the cache is up to date before we start
+  // Currently disabled because it takes time and we want to be fast
+  // await workspace.flush()
+  const workspace = await loadLocalWorkspace({
+    path: workspacePath,
+    ignoreFileChanges: true,
+    persistent: false,
+  })
+
+  const envName = workspace.currentEnv()
+  const remoteMapCreator = createRemoteMapCreator(input.cacheDir)
+  outputLine(`Finding elements with static files in ${envName}`, output)
+  const elementsWithStaticFilesMap = await remoteMapCreator<string[]>({
+    namespace: `workspace-${envName}-referencedStaticFiles`,
+    serialize: async val => safeJsonStringify(val),
+    deserialize: data => JSON.parse(data),
+    persistent: false,
+  })
+  const elementsWithStaticFiles = await awu(elementsWithStaticFilesMap.keys()).toArray()
+  outputLine(`Checking ${elementsWithStaticFiles.length} elements with static files`, output)
+
+  const remoteMapsToLoad = [
+    `naclFileSource-envs/${envName}-merged`,
+    'naclFileSource--merged', // Common nacl source, just in case
+    `multi_env-${envName}-merged`,
+    `workspace-${envName}-merged`,
+    `state-${envName}-elements`,
+  ]
+  const remoteMaps = await Promise.all(
+    remoteMapsToLoad.map(namespace =>
+      remoteMapCreator({
+        namespace,
+        serialize: element => serialization.serialize([element], 'keepRef'),
+        deserialize: s => serialization.deserializeSingleElement(s, async staticFile => staticFile),
+        persistent: false,
+      }),
+    ),
+  )
+
+  const issueIterator = awu(elementsWithStaticFiles)
+    .map(async id => {
+      const elements = await Promise.all(remoteMaps.map(remoteMap => remoteMap.get(id)))
+      const definedElements = elements.filter(values.isDefined).filter(isElement)
+      if (definedElements.length !== 4) {
+        // Should never happen
+        throw new Error(`Not enough elements found for id ${id}, found ${definedElements.length} elements`)
+      }
+      const staticFilesByName = _.groupBy(definedElements.flatMap(nacl.getNestedStaticFiles), file => file.filepath)
+      const mismatchedFiles = Object.entries(staticFilesByName)
+        .map(([path, files]) => {
+          const hashes = files.map(f => f.hash)
+          if (new Set(hashes).size !== 1) {
+            return { path, hashes }
+          }
+          return undefined
+        })
+        .filter(values.isDefined)
+      if (mismatchedFiles.length > 0) {
+        return { id, mismatchedFiles }
+      }
+      return undefined
+    })
+    .filter(values.isDefined)
+
+  const issues = input.Fix ? await issueIterator.toArray() : [await issueIterator.peek()].filter(values.isDefined)
+
+  await Promise.all(remoteMaps.map(remoteMap => remoteMap.close()))
+
+  if (issues.length > 0) {
+    outputLine('Found issues in cache', output)
+    issues.forEach(({ id, mismatchedFiles }) => {
+      outputLine(`${id}: ${mismatchedFiles.map(({ path }) => `${path}`)}`, output)
+    })
+    return CliExitCode.AppError
+  }
+  outputLine('Cache is valid', output)
+  return CliExitCode.Success
+}
+
+const cacheVerifyDef = createPublicCommandDef({
+  properties: {
+    name: 'verify',
+    description: 'Verify cache static files are consistent',
+    keyedOptions: [
+      {
+        name: 'cacheDir',
+        type: 'string',
+      },
+      {
+        name: 'Fix',
+        type: 'boolean',
+      },
+    ],
+  },
+  action: cacheVerifyAction,
+})
+
 const cacheGroupDef = createCommandGroupDef({
   properties: {
     name: 'cache',
     description: 'Commands for workspace cache administration',
   },
-  subCommands: [cacheUpdateDef],
+  subCommands: [cacheUpdateDef, cacheVerifyDef],
 })
 
 type SetStateProviderArgs = {
