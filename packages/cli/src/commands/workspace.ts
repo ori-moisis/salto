@@ -6,8 +6,10 @@
  * CERTAIN THIRD PARTY SOFTWARE MAY BE CONTAINED IN PORTIONS OF THE SOFTWARE. See NOTICE FILE AT https://github.com/salto-io/salto/blob/main/NOTICES
  */
 import { EOL } from 'os'
+import path from 'path'
 import _ from 'lodash'
-import { cleanWorkspace, createRemoteMapCreator, loadLocalWorkspace } from '@salto-io/core'
+import { createWriteStream, readFile } from '@salto-io/file'
+import { cleanWorkspace, closeAllRemoteMaps, createRemoteMapCreator, loadLocalWorkspace } from '@salto-io/core'
 import { collections, values } from '@salto-io/lowerdash'
 import { safeJsonStringify } from '@salto-io/adapter-utils'
 import { nacl, ProviderOptionsS3, serialization, StateConfig, WorkspaceComponents } from '@salto-io/workspace'
@@ -150,86 +152,112 @@ const cacheUpdateDef = createWorkspaceCommand({
 })
 
 type CacheVerifyArgs = {
+  pathsFile: string
+  outputPath: string
   cacheDir: string
-  Fix: boolean
+  FindAll: boolean
 }
-const cacheVerifyAction: CommandDefAction<CacheVerifyArgs> = async ({ workspacePath, input, output }) => {
-  // Making sure the cache is up to date before we start
-  // Currently disabled because it takes time and we want to be fast
-  // await workspace.flush()
-  const workspace = await loadLocalWorkspace({
-    path: workspacePath,
-    ignoreFileChanges: true,
-    persistent: false,
-  })
+const cacheVerifyAction: CommandDefAction<CacheVerifyArgs> = async ({ input, output }) => {
+  // In theory we should run await workspace.flush() before we start to make sure the cache is up to date
+  // but we want this to run fast, so we don't want to actually load the workspace
 
-  const envName = workspace.currentEnv()
-  const remoteMapCreator = createRemoteMapCreator(input.cacheDir)
-  outputLine(`Finding elements with static files in ${envName}`, output)
-  const elementsWithStaticFilesMap = await remoteMapCreator<string[]>({
-    namespace: `workspace-${envName}-referencedStaticFiles`,
-    serialize: async val => safeJsonStringify(val),
-    deserialize: data => JSON.parse(data),
-    persistent: false,
-  })
-  const elementsWithStaticFiles = await awu(elementsWithStaticFilesMap.keys()).toArray()
-  outputLine(`Checking ${elementsWithStaticFiles.length} elements with static files`, output)
+  const badPathsFile = createWriteStream(input.outputPath)
+  const paths = (await readFile(input.pathsFile)).toString().split('\n')
 
-  const remoteMapsToLoad = [
-    `naclFileSource-envs/${envName}-merged`,
-    'naclFileSource--merged', // Common nacl source, just in case
-    `multi_env-${envName}-merged`,
-    `workspace-${envName}-merged`,
-    `state-${envName}-elements`,
-  ]
-  const remoteMaps = await Promise.all(
-    remoteMapsToLoad.map(namespace =>
-      remoteMapCreator({
-        namespace,
-        serialize: element => serialization.serialize([element], 'keepRef'),
-        deserialize: s => serialization.deserializeSingleElement(s, async staticFile => staticFile),
+  await awu(paths).forEach(async (workspacePath, idx) => {
+    const pathName = path.basename(path.dirname(workspacePath))
+    const println = (msg: string): void => {
+      output.stdout.write(`${pathName}: ${msg}\n`)
+      output.stdout.write(`Folder ${idx} of ${paths.length}\r`)
+    }
+
+    let envName: string
+    try {
+      const workspace = await loadLocalWorkspace({
+        path: workspacePath,
+        ignoreFileChanges: true,
         persistent: false,
-      }),
-    ),
-  )
+      })
+      envName = workspace.currentEnv()
+    } catch (e) {
+      println(`Invalid workspace: ${e}`)
+      return
+    }
+    if (!envName) {
+      return
+    }
 
-  const issueIterator = awu(elementsWithStaticFiles)
-    .map(async id => {
-      const elements = await Promise.all(remoteMaps.map(remoteMap => remoteMap.get(id)))
-      const definedElements = elements.filter(values.isDefined).filter(isElement)
-      if (definedElements.length !== 4) {
-        // Should never happen
-        throw new Error(`Not enough elements found for id ${id}, found ${definedElements.length} elements`)
-      }
-      const staticFilesByName = _.groupBy(definedElements.flatMap(nacl.getNestedStaticFiles), file => file.filepath)
-      const mismatchedFiles = Object.entries(staticFilesByName)
-        .map(([path, files]) => {
-          const hashes = files.map(f => f.hash)
-          if (new Set(hashes).size !== 1) {
-            return { path, hashes }
-          }
-          return undefined
-        })
-        .filter(values.isDefined)
-      if (mismatchedFiles.length > 0) {
-        return { id, mismatchedFiles }
-      }
-      return undefined
+    const remoteMapCreator = createRemoteMapCreator(path.resolve(path.join(workspacePath, input.cacheDir)))
+    const elementsWithStaticFilesMap = await remoteMapCreator<string[]>({
+      namespace: `workspace-${envName}-referencedStaticFiles`,
+      serialize: async val => safeJsonStringify(val),
+      deserialize: data => JSON.parse(data),
+      persistent: false,
     })
-    .filter(values.isDefined)
+    const elementsWithStaticFiles = await awu(elementsWithStaticFilesMap.keys()).toArray()
+    if (elementsWithStaticFiles.length > 500) {
+      println(`Checking ${elementsWithStaticFiles.length} elements`)
+    }
 
-  const issues = input.Fix ? await issueIterator.toArray() : [await issueIterator.peek()].filter(values.isDefined)
+    const remoteMapsToLoad = [
+      `naclFileSource-envs/${envName}-merged`,
+      'naclFileSource--merged', // Common nacl source, just in case
+      `multi_env-${envName}-merged`,
+      `workspace-${envName}-merged`,
+      `state-${envName}-elements`,
+    ]
+    const remoteMaps = await Promise.all(
+      remoteMapsToLoad.map(namespace =>
+        remoteMapCreator({
+          namespace,
+          serialize: element => serialization.serialize([element], 'keepRef'),
+          deserialize: s => serialization.deserializeSingleElement(s, async staticFile => staticFile),
+          persistent: false,
+        }),
+      ),
+    )
 
-  await Promise.all(remoteMaps.map(remoteMap => remoteMap.close()))
+    const issueIterator = awu(elementsWithStaticFiles)
+      .map(async id => {
+        const elements = await Promise.all(remoteMaps.map(remoteMap => remoteMap.get(id)))
+        const definedElements = elements.filter(values.isDefined).filter(isElement)
+        if (definedElements.length !== 4) {
+          // This can happen if there is no state cache
+          println(`Not enough elements found for id ${id}, found ${definedElements.length} elements`)
+        }
+        const staticFilesByName = _.groupBy(definedElements.flatMap(nacl.getNestedStaticFiles), file => file.filepath)
+        const mismatchedFiles = Object.entries(staticFilesByName)
+          .map(([filepath, files]) => {
+            const hashes = files.map(f => f.hash)
+            if (new Set(hashes).size !== 1) {
+              return { filepath, hashes }
+            }
+            return undefined
+          })
+          .filter(values.isDefined)
+        if (mismatchedFiles.length > 0) {
+          return { id, mismatchedFiles }
+        }
+        return undefined
+      })
+      .filter(values.isDefined)
 
-  if (issues.length > 0) {
-    outputLine('Found issues in cache', output)
-    issues.forEach(({ id, mismatchedFiles }) => {
-      outputLine(`${id}: ${mismatchedFiles.map(({ path }) => `${path}`)}`, output)
-    })
-    return CliExitCode.AppError
-  }
-  outputLine('Cache is valid', output)
+    const issues = input.FindAll ? await issueIterator.toArray() : [await issueIterator.peek()].filter(values.isDefined)
+
+    await Promise.all(remoteMaps.map(remoteMap => remoteMap.close()))
+    await closeAllRemoteMaps()
+
+    if (issues.length > 0) {
+      println('Found issues in cache')
+      badPathsFile.write(`${workspacePath}\n`)
+      issues.forEach(({ id, mismatchedFiles }) => {
+        println(`${id}: ${mismatchedFiles.map(({ filepath }) => filepath)}`)
+      })
+      return
+    }
+    println('Cache is valid')
+  })
+  badPathsFile.close()
   return CliExitCode.Success
 }
 
@@ -241,10 +269,23 @@ const cacheVerifyDef = createPublicCommandDef({
       {
         name: 'cacheDir',
         type: 'string',
+        description: 'Relative location of the cache dir (relative to workspace path)',
       },
       {
-        name: 'Fix',
+        name: 'FindAll',
         type: 'boolean',
+        description: 'Find all files with non matching hashes (default - stop on the first mismatch)',
+      },
+      {
+        name: 'pathsFile',
+        type: 'string',
+        description: 'file with all the paths to check',
+      },
+      {
+        name: 'outputPath',
+        type: 'string',
+        description: 'file name to write all invalid paths to',
+        default: 'bad.txt',
       },
     ],
   },
