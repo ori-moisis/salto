@@ -173,16 +173,6 @@ export const buildStaticFilesSource = (
           })
         }
 
-        if (staticFileData.buffer !== undefined) {
-          const staticFileWithHashAndContent = new AbsoluteStaticFile({
-            filepath: args.filepath,
-            content: staticFileData.buffer,
-            encoding: args.encoding,
-            absoluteFilePath: staticFilesDirStore.getFullPath(args.filepath),
-            isTemplate: args.isTemplate,
-          })
-          return staticFileWithHashAndContent
-        }
         return new LazyStaticFile(
           args.filepath,
           staticFileData.hash,
