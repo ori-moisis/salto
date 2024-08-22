@@ -63,7 +63,8 @@ export const createLocationCachePool = (
       }
       poolEntry.refcnt -= 1
 
-      if (poolEntry.refcnt === 0) {
+      // eslint-disable-next-line no-constant-condition
+      if (poolEntry.refcnt === 0 || true) {
         pool.delete(location)
         if (pool.size === 0) {
           log.debug('Last location closed. Max location cache pool size: %d', poolSizeWatermark)

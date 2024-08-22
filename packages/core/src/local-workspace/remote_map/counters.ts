@@ -81,7 +81,8 @@ const createStatCounters = (): StatCounters => {
       }
       const locationInfo = locations.get(location)
       locationInfo.refCnt -= 1
-      if (locationInfo.refCnt === 0) {
+      // eslint-disable-next-line no-constant-condition
+      if (locationInfo.refCnt === 0 || true) {
         locations.delete(location)
       }
     },
