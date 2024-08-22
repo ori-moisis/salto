@@ -9,11 +9,17 @@ import { EOL } from 'os'
 import path from 'path'
 import _ from 'lodash'
 import { createWriteStream, readFile } from '@salto-io/file'
-import { cleanWorkspace, closeAllRemoteMaps, createRemoteMapCreator, loadLocalWorkspace } from '@salto-io/core'
-import { collections, values } from '@salto-io/lowerdash'
+import {
+  cleanWorkspace,
+  closeAllRemoteMaps,
+  createRemoteMapCreator,
+  loadLocalWorkspace,
+  localDirectoryStore,
+} from '@salto-io/core'
+import { collections, promises, values } from '@salto-io/lowerdash'
 import { safeJsonStringify } from '@salto-io/adapter-utils'
 import { nacl, ProviderOptionsS3, serialization, StateConfig, WorkspaceComponents } from '@salto-io/workspace'
-import { isElement } from '@salto-io/adapter-api'
+import { calculateStaticFileHash } from '@salto-io/adapter-api'
 import { getUserBooleanInput } from '../callbacks'
 import {
   header,
@@ -152,17 +158,24 @@ const cacheUpdateDef = createWorkspaceCommand({
 })
 
 type CacheVerifyArgs = {
-  pathsFile: string
+  path?: string
+  pathsFile?: string
   outputPath: string
   cacheDir: string
   FindAll: boolean
+  CompareState: boolean
 }
 const cacheVerifyAction: CommandDefAction<CacheVerifyArgs> = async ({ input, output }) => {
   // In theory we should run await workspace.flush() before we start to make sure the cache is up to date
   // but we want this to run fast, so we don't want to actually load the workspace
 
   const badPathsFile = createWriteStream(input.outputPath)
-  const paths = (await readFile(input.pathsFile)).toString().split('\n')
+  if (input.path === undefined && input.pathsFile === undefined) {
+    outputLine('One of --path or --paths-file must be specified', output)
+    return CliExitCode.UserInputError
+  }
+  const paths =
+    input.pathsFile !== undefined ? (await readFile(input.pathsFile)).toString().split('\n') : [input.path as string]
 
   await awu(paths).forEach(async (workspacePath, idx) => {
     const pathName = path.basename(path.dirname(workspacePath))
@@ -187,7 +200,10 @@ const cacheVerifyAction: CommandDefAction<CacheVerifyArgs> = async ({ input, out
       return
     }
 
-    const remoteMapCreator = createRemoteMapCreator(path.resolve(path.join(workspacePath, input.cacheDir)))
+    const cacheDir = path.isAbsolute(input.cacheDir)
+      ? input.cacheDir
+      : path.resolve(path.join(workspacePath, input.cacheDir))
+    const remoteMapCreator = createRemoteMapCreator(cacheDir)
     const elementsWithStaticFilesMap = await remoteMapCreator<string[]>({
       namespace: `workspace-${envName}-referencedStaticFiles`,
       serialize: async val => safeJsonStringify(val),
@@ -199,38 +215,71 @@ const cacheVerifyAction: CommandDefAction<CacheVerifyArgs> = async ({ input, out
       println(`Checking ${elementsWithStaticFiles.length} elements`)
     }
 
-    const remoteMapsToLoad = [
-      `naclFileSource-envs/${envName}-merged`,
-      'naclFileSource--merged', // Common nacl source, just in case
-      `multi_env-${envName}-merged`,
-      `workspace-${envName}-merged`,
-      `state-${envName}-elements`,
-    ]
-    const remoteMaps = await Promise.all(
-      remoteMapsToLoad.map(namespace =>
-        remoteMapCreator({
-          namespace,
-          serialize: element => serialization.serialize([element], 'keepRef'),
-          deserialize: s => serialization.deserializeSingleElement(s, async staticFile => staticFile),
-          persistent: false,
-        }),
-      ),
+    const remoteMapsToLoad = {
+      envNacl: `naclFileSource-envs/${envName}-merged`,
+      commonNacl: 'naclFileSource--merged', // Common nacl source, just in case
+      multiEnv: `multi_env-${envName}-merged`,
+      workspace: `workspace-${envName}-merged`,
+      ...(input.CompareState ? { state: `state-${envName}-elements` } : {}),
+    } as const
+
+    const remoteMaps = await promises.object.mapValuesAsync(remoteMapsToLoad, namespace =>
+      remoteMapCreator({
+        namespace,
+        serialize: element => serialization.serialize([element], 'keepRef'),
+        deserialize: s => serialization.deserializeSingleElement(s, async staticFile => staticFile),
+        persistent: false,
+      }),
     )
+
+    const isCommonEmpty = await remoteMaps.commonNacl.isEmpty()
+    const elementSources = _.omit(remoteMaps, isCommonEmpty ? 'commonNacl' : 'envNacl')
+
+    const staticFilesCache = await remoteMapCreator<{ hash: string }>({
+      namespace: `staticFilesCache-${isCommonEmpty ? `envs/${envName}` : 'common'}`,
+      serialize: async cacheEntry => safeJsonStringify(cacheEntry),
+      deserialize: async data => JSON.parse(data),
+      persistent: false,
+    })
+    const dirStore = localDirectoryStore({
+      baseDir: `${workspacePath}${isCommonEmpty ? `/envs/${envName}` : ''}`,
+      name: 'static-resources',
+    })
 
     const issueIterator = awu(elementsWithStaticFiles)
       .map(async id => {
-        const elements = await Promise.all(remoteMaps.map(remoteMap => remoteMap.get(id)))
-        const definedElements = elements.filter(values.isDefined).filter(isElement)
-        if (definedElements.length !== 4) {
-          // This can happen if there is no state cache
-          println(`Not enough elements found for id ${id}, found ${definedElements.length} elements`)
-        }
-        const staticFilesByName = _.groupBy(definedElements.flatMap(nacl.getNestedStaticFiles), file => file.filepath)
-        const mismatchedFiles = Object.entries(staticFilesByName)
+        const elementsBySource = await promises.object.mapValuesAsync(elementSources, remoteMap => remoteMap.get(id))
+
+        const sourceToStaticFiles = _.mapValues(elementsBySource, elem =>
+          elem === undefined ? {} : _.keyBy(nacl.getNestedStaticFiles(elem), file => file.filepath),
+        )
+        const staticFilePaths = Array.from(new Set(Object.values(sourceToStaticFiles).flatMap(Object.keys)))
+        const staticFilesByPath = Object.fromEntries(
+          staticFilePaths.map(filepath => [filepath, _.mapValues(sourceToStaticFiles, files => files[filepath]?.hash)]),
+        )
+
+        const fullStaticFilesByPath = await promises.object.mapValuesAsync(
+          staticFilesByPath,
+          async (files, filepath) => {
+            const cachedHash = (await staticFilesCache.get(filepath))?.hash
+            const actualBuffer = (await dirStore.get(filepath))?.buffer
+            const actualHash = actualBuffer === undefined ? undefined : calculateStaticFileHash(actualBuffer)
+            return {
+              ...files,
+              staticFilesCache: cachedHash,
+              file: actualHash,
+            }
+          },
+        )
+        const mismatchedFiles = Object.entries(fullStaticFilesByPath)
           .map(([filepath, files]) => {
-            const hashes = files.map(f => f.hash)
+            // The static files cache might not hold an entry to a file it was created in the last operation
+            // This is because the static files cache is not updated on write, it is only updated on read
+            // so, new files won't appear in the cache until the next operation tries to read them
+            const filesToCheck = files.staticFilesCache === undefined ? _.omit(files, 'staticFilesCache') : files
+            const hashes = Object.values(filesToCheck)
             if (new Set(hashes).size !== 1) {
-              return { filepath, hashes }
+              return { filepath, files }
             }
             return undefined
           })
@@ -244,14 +293,17 @@ const cacheVerifyAction: CommandDefAction<CacheVerifyArgs> = async ({ input, out
 
     const issues = input.FindAll ? await issueIterator.toArray() : [await issueIterator.peek()].filter(values.isDefined)
 
-    await Promise.all(remoteMaps.map(remoteMap => remoteMap.close()))
     await closeAllRemoteMaps()
 
     if (issues.length > 0) {
       println('Found issues in cache')
       badPathsFile.write(`${workspacePath}\n`)
       issues.forEach(({ id, mismatchedFiles }) => {
-        println(`${id}: ${mismatchedFiles.map(({ filepath }) => filepath)}`)
+        mismatchedFiles.forEach(({ filepath, files }) => {
+          Object.entries(files).forEach(([source, hash]) => {
+            println(`Element=${id} file=${filepath} hash=${hash}, source=${source}`)
+          })
+        })
       })
       return
     }
@@ -269,12 +321,17 @@ const cacheVerifyDef = createPublicCommandDef({
       {
         name: 'cacheDir',
         type: 'string',
-        description: 'Relative location of the cache dir (relative to workspace path)',
+        description: 'Absolute or Relative location of the cache dir (relative to workspace path)',
       },
       {
         name: 'FindAll',
         type: 'boolean',
         description: 'Find all files with non matching hashes (default - stop on the first mismatch)',
+      },
+      {
+        name: 'path',
+        type: 'string',
+        description: 'One path to check',
       },
       {
         name: 'pathsFile',
@@ -286,6 +343,11 @@ const cacheVerifyDef = createPublicCommandDef({
         type: 'string',
         description: 'file name to write all invalid paths to',
         default: 'bad.txt',
+      },
+      {
+        name: 'CompareState',
+        type: 'boolean',
+        description: 'Compare state element source as well, using this if pending changes are not allowed',
       },
     ],
   },
